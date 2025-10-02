@@ -21,6 +21,7 @@ export function middleware (req: Request, res: Response, next: NextFunction) {
   if(decoded){
     //@ts-ignore
     req.userId = decoded.userId;
+    next();
   } else {
     res.json({
       msg: "Unauthorized!"

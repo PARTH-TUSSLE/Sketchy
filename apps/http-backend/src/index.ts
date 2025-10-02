@@ -2,7 +2,11 @@ import express from "express";
 import Jwt from "jsonwebtoken";
 import { middleware } from "./middleware.js";
 import { JWT_SECRET } from "@repo/backend-common/config"
-import { CreateUserSchema, SignInSchema, RoomSchema } from "@repo/common/types"
+import {
+  CreateUserSchema,
+  SignInSchema,
+  CreateRoomSchema,
+} from "@repo/common/types";
 
 const app = express();
 const port = 8080;
@@ -27,8 +31,16 @@ app.post("/signin", (req, res) => {
   res.json({ token });
 });
 
-app.post("/room", middleware, (req, res) => {});
+app.post("/room", middleware, (req, res) => {
+  const data = CreateRoomSchema.safeParse(req.body);
+  if (!data.success) {
+    return res.json({
+      message: "Incorrect inputs",
+    });
+  }
+});
 
 app.listen(port, () => {
   console.log(`App is listening on port ${port}`);
 });
+ 

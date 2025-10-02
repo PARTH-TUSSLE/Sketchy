@@ -11,6 +11,6 @@
     password: z.string(),
   });
 
-  export const RoomSchema = z.object({
+  export const CreateRoomSchema = z.object({
     name: z.string().min(5).max(30)
   });
