@@ -107,23 +107,43 @@ app.post("/room", middleware, async (req, res) => {
 
 app.get("/chats/:roomId", async (req, res) => {
 
-  const { roomId } = req.params;
+  try {
+      const { roomId } = req.params;
 
-  const messages = await prismaClient.chat.findMany({
-    where: {
-      roomId: Number(roomId)
-    },
-    orderBy: {
-      id: "desc"
-    },
-    take: 50
-  })
+      const messages = await prismaClient.chat.findMany({
+        where: {
+          roomId: Number(roomId),
+        },
+        orderBy: {
+          id: "asc"
+        },
+        take: 50,
+      });
 
-  res.json({
-    messages
-  })
+      res.json({
+        messages,
+      });
+  } catch (error) {
+    res.send({
+      error
+    })
+  }
 
 })
+
+app.get("/room/:slug", async (req, res) => {
+  const { slug } = req.params;
+
+  const room = await prismaClient.room.findFirst({
+    where: {
+      slug: slug
+    },
+  });
+
+  res.json({
+    room
+  });
+});
 
 app.listen(port, () => {
   console.log(`App is listening on port ${port}`);
