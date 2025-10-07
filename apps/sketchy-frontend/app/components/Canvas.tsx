@@ -1,17 +1,35 @@
 import { useRef, useEffect, useState } from "react";
 import initDraw from "../draw/index";
-import { IconButton } from "../components/IconButton"
+import { IconButton } from "../components/IconButton";
 import { Circle, Pencil, RectangleHorizontal } from "lucide-react";
+import { Game } from "../draw/Game";
 
-export default function Canvas({ roomId, socket }: { roomId: string, socket: WebSocket }) {
+export default function Canvas({
+  roomId,
+  socket,
+}: {
+  roomId: string;
+  socket: WebSocket;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  
+  const [selectedTool, setSelectedTool] = useState<Tool>("pencil");
+  const [game, setGame] = useState<Game>();
 
   useEffect(() => {
     if (canvasRef.current) {
-      initDraw(canvasRef.current, roomId, socket);
+      const g = new Game(canvasRef.current, roomId, socket);
+      setGame(g);
+
+       return () => {
+         g.destroy();
+       };
+
     }
   }, [canvasRef]);
+
+  useEffect(() => {
+    game?.setTool(selectedTool)
+  }, [selectedTool, game]);
 
   return (
     <div>
@@ -21,23 +39,19 @@ export default function Canvas({ roomId, socket }: { roomId: string, socket: Web
         width={1439}
         height={810}
       ></canvas>
-      <TopBar/>
+      <TopBar selectedTool={selectedTool} setSelectedTool={setSelectedTool} />
     </div>
   );
 }
 
+export type Tool = "pencil" | "rect" | "circle";
 
-function TopBar () {
+interface TopBarProps {
+  selectedTool: Tool;
+  setSelectedTool: (tool: Tool) => void;
+}
 
-  type Shape = "pencil" | "rect" | "circle";
-
-  const [selectedTool, setSelectedTool] = useState<Shape>("pencil");
-
-  useEffect(() => {
-    //@ts-ignore
-    window.selectedTool = selectedTool
-  },[selectedTool])
-
+function TopBar({ selectedTool, setSelectedTool }: TopBarProps) {
   return (
     <div
       className="absolute top-4 left-165  flex gap-4
