@@ -33,6 +33,11 @@ function TopBar () {
 
   const [selectedTool, setSelectedTool] = useState<Shape>("pencil");
 
+  useEffect(() => {
+    //@ts-ignore
+    window.selectedTool = selectedTool
+  },[selectedTool])
+
   return (
     <div
       className="absolute top-4 left-165  flex gap-4
