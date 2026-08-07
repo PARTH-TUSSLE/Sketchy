@@ -1,5 +1,4 @@
 import { useRef, useEffect, useState } from "react";
-import initDraw from "../draw/index";
 import { IconButton } from "../components/IconButton";
 import { Circle, Pencil, RectangleHorizontal } from "lucide-react";
 import { Game } from "../draw/Game";

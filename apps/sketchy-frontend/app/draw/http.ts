@@ -1,20 +1,20 @@
 import axios from "axios";
 import { BACKEND_URL } from "../config";
+import { getToken } from "../lib/auth";
+import { Shape } from "./Game";
 
-export async function getExistingShapes(roomId: string) {
-  const res = await axios.get(`${BACKEND_URL}/chats/${roomId}`);
-  const messages = res.data.messages || [];
+export async function getExistingShapes(roomId: string): Promise<Shape[]> {
+  const token = getToken();
 
-  const shapes = messages
-    .map((x: { message: string }) => {
-      try {
-        const messageData = JSON.parse(x.message);
-        return messageData.shape;
-      } catch {
-        return null;
-      }
-    })
-    .filter((shape: any) => shape !== null);
+  const res = await axios.get(`${BACKEND_URL}/shapes/${roomId}`, {
+    headers: token ? { Authorization: token } : {},
+  });
 
-  return shapes;
+  const shapes = (res.data.shapes || []) as {
+    id: number;
+    type: string;
+    payload: Shape;
+  }[];
+
+  return shapes.map((s) => s.payload);
 }
