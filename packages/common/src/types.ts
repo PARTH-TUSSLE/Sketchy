@@ -1,16 +1,25 @@
-  import z from "zod";
+import z from "zod";
 
-  export const CreateUserSchema = z.object({
-    username: z.string().min(5).max(30),
-    password: z.string(),
-    name: z.string()
-  })
+export const CreateUserSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+  name: z.string().min(1),
+});
 
-  export const SignInSchema = z.object({
-    username: z.string().min(5).max(30),
-    password: z.string(),
-  });
+export const SignInSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
 
-  export const CreateRoomSchema = z.object({
-    name: z.string().min(5).max(30)
-  });
+export const CreateRoomSchema = z.object({
+  name: z.string().min(3).max(30),
+});
+
+export const RoomIdSchema = z.object({
+  roomId: z.union([z.string().min(1), z.number().int().positive()]),
+});
+
+export const ChatMessageSchema = z.object({
+  roomId: z.union([z.string().min(1), z.number().int().positive()]),
+  message: z.string().min(1).max(4000),
+});
