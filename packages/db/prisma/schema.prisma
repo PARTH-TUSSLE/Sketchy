@@ -23,7 +23,8 @@ model Room {
   createdAt   DateTime @default(now())
   adminId     String
   admin       User @relation(fields: [adminId], references: [id])
-  chats       Chat[] 
+  chats       Chat[]
+  shapes      Shape[]
 }
 
 model Chat {
@@ -33,4 +34,13 @@ model Chat {
   userId      String
   room        Room @relation(fields: [roomId], references: [id])
   user        User @relation(fields: [userId], references: [id])
+}
+
+model Shape {
+  id          Int @id @default(autoincrement())
+  roomId      Int
+  type        String
+  payload     Json
+  createdAt   DateTime @default(now())
+  room        Room @relation(fields: [roomId], references: [id])
 }

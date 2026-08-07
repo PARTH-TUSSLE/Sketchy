@@ -1,30 +1,25 @@
+import { WebSocket } from "ws";
 import { WebSocketServer } from "ws";
-import Jwt, { JwtPayload } from "jsonwebtoken";
-import WebSocket from "ws";
+import { JwtPayload } from "jsonwebtoken";
+import Jwt from "jsonwebtoken";
 import "dotenv/config";
 import { prismaClient } from "@repo/db/client";
-
-const JWT_SECRET = process.env.JWT_SECRET || "qwertyuiopasdfghjklzxcvbnm";
+import { getJwtSecret } from "@repo/backend-common/config";
+import { ChatMessageSchema } from "@repo/common/types";
+import { joinRoom, leaveRoom } from "./rooms.js";
+import type { User } from "./rooms.js";
 
 const wss = new WebSocketServer({ port: 8000 });
 
-interface User {
-  ws: WebSocket;
-  rooms: string[];
-  userId: string;
-}
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const users: User[] = [];
 
 function checkUser(token: string): string | null {
   try {
-    const decoded = Jwt.verify(token, JWT_SECRET);
+    const decoded = Jwt.verify(token, getJwtSecret()) as JwtPayload;
 
-    if (typeof decoded == "string") {
-      return null;
-    }
-
-    if (!decoded || !decoded.userId) {
+    if (!decoded || typeof decoded.userId !== "string") {
       return null;
     }
 
@@ -32,6 +27,17 @@ function checkUser(token: string): string | null {
   } catch (e) {
     return null;
   }
+}
+
+function toRoomId(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value === "string" && !isNaN(Number(value))) {
+    const id = Number(value);
+    return Number.isInteger(id) && id > 0 ? id : null;
+  }
+  return null;
 }
 
 wss.on("connection", function connection(ws, request) {
@@ -58,59 +64,141 @@ wss.on("connection", function connection(ws, request) {
     return;
   }
 
-  users.push({
-    userId,
-    rooms: [],
-    ws,
+  // Remove any stale connection for the same socket
+  const existing = users.find((x) => x.ws === ws);
+  if (existing) {
+    users.splice(users.indexOf(existing), 1);
+  }
+
+  const user: User = { userId, rooms: [], ws, isAlive: true };
+  users.push(user);
+
+  ws.on("pong", () => {
+    user.isAlive = true;
   });
 
   ws.on("message", async function message(data) {
-    const parsedData = JSON.parse(data as unknown as string);
-
-    if (parsedData.type === "join_room") {
-      const user = users.find((x) => x.ws === ws);
-      if (user && !user.rooms.includes(parsedData.roomId)) {
-        user.rooms.push(parsedData.roomId);
-      }
+    let parsedData: any;
+    try {
+      parsedData = JSON.parse(data as unknown as string);
+    } catch (error) {
+      ws.send(JSON.stringify({ type: "error", msg: "Malformed JSON payload" }));
+      return;
     }
 
-    if (parsedData.type === "leave_room") {
-      const user = users.find((x) => x.ws === ws);
+    const type = parsedData?.type;
+    const roomId = toRoomId(parsedData?.roomId);
 
-      if (!user) {
+    if (type === "join_room") {
+      if (roomId === null) {
         return;
       }
-
-      user.rooms = user?.rooms.filter((x) => x === parsedData.room);
+      const next = joinRoom(user, roomId);
+      user.rooms = next.rooms;
+      return;
     }
 
-    if (parsedData.type === "chat") {
-      const roomId = parsedData.roomId;
-      const message = parsedData.message;
+    if (type === "leave_room") {
+      if (roomId === null) {
+        return;
+      }
+      // useRoom() keeps every room except the one being left (fixes the "keep the wrong room" bug)
+      const next = leaveRoom(user, roomId);
+      user.rooms = next.rooms;
+      return;
+    }
+
+    if (type === "chat") {
+      const parse = ChatMessageSchema.safeParse({
+        roomId: parsedData.roomId,
+        message: parsedData.message,
+      });
+      if (!parse.success || roomId === null) {
+        return;
+      }
 
       try {
         await prismaClient.chat.create({
           data: {
-            roomId: parseInt(roomId),
-            message,
+            roomId,
+            message: parse.data.message,
             userId,
           },
         });
       } catch (error) {
+        console.error("Failed to persist chat message:", error);
         return;
       }
 
-      users.forEach((user) => {
-        if (user.rooms.includes(roomId)) {
-          user.ws.send(
-            JSON.stringify({
-              type: "chat",
-              message: message,
-              roomId,
-            })
-          );
-        }
+      broadcast(roomId, {
+        type: "chat",
+        message: parse.data.message,
+        roomId: roomId.toString(),
+      });
+      return;
+    }
+
+    if (type === "shape") {
+      const shapeType = parsedData?.shape?.type;
+      const payload = parsedData?.shape;
+
+      if (roomId === null || !shapeType || typeof shapeType !== "string" || !payload) {
+        return;
+      }
+
+      try {
+        await prismaClient.shape.create({
+          data: {
+            roomId,
+            type: shapeType,
+            payload,
+          },
+        });
+      } catch (error) {
+        console.error("Failed to persist shape:", error);
+        return;
+      }
+
+      broadcast(roomId, {
+        type: "shape",
+        shape: payload,
+        roomId: roomId.toString(),
       });
     }
   });
+
+  ws.on("close", () => {
+    const idx = users.findIndex((x) => x.ws === ws);
+    if (idx !== -1) {
+      users.splice(idx, 1);
+    }
+  });
+});
+
+function broadcast(roomId: number, data: object) {
+  const payload = JSON.stringify(data);
+  users.forEach((target) => {
+    if (target.rooms.includes(roomId) && target.ws.readyState === WebSocket.OPEN) {
+      target.ws.send(payload);
+    }
+  });
+}
+
+const heartbeat = setInterval(function ping() {
+  users.forEach((target) => {
+    if (!target.isAlive) {
+      target.ws.terminate();
+      const idx = users.findIndex((x) => x.ws === target.ws);
+      if (idx !== -1) {
+        users.splice(idx, 1);
+      }
+      return;
+    }
+    target.isAlive = false;
+    target.ws.ping();
+  });
+}, HEARTBEAT_INTERVAL_MS);
+
+wss.on("close", () => {
+  clearInterval(heartbeat);
 });
