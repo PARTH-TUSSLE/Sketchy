@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import "dotenv/config";
+import dotenv from "dotenv";
 import Jwt from "jsonwebtoken";
 import { middleware } from "./middleware.js";
 import { rateLimiter } from "./rateLimit.js";
@@ -11,6 +11,8 @@ import {
   SignInSchema,
   CreateRoomSchema,
 } from "@repo/common/types";
+
+dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
 const app = express();
 const port = 8080;

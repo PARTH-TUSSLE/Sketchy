@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc -b",
     "start": "node dist/index.js",
-    "dev": "node --watch src/index.ts",
+    "dev": "tsx watch src/index.ts",
     "dev:tsc": "npm run build && npm run start",
     "check-types": "tsc --noEmit",
     "test": "node --test test/"
@@ -24,7 +24,8 @@
   "devDependencies": {
     "@repo/backend-common": "workspace:*",
     "@repo/common": "workspace:*",
-    "@repo/db": "workspace:*"
+    "@repo/db": "workspace:*",
+    "tsx": "^4.23.11"
   },
   "keywords": [],
   "author": "",

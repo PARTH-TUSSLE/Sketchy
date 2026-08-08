@@ -2,12 +2,14 @@ import { WebSocket } from "ws";
 import { WebSocketServer } from "ws";
 import { JwtPayload } from "jsonwebtoken";
 import Jwt from "jsonwebtoken";
-import "dotenv/config";
+import dotenv from "dotenv";
 import { prismaClient } from "@repo/db/client";
 import { getJwtSecret } from "@repo/backend-common/config";
 import { ChatMessageSchema } from "@repo/common/types";
 import { joinRoom, leaveRoom } from "./rooms.js";
 import type { User } from "./rooms.js";
+
+dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
 const wss = new WebSocketServer({ port: 8000 });
 
