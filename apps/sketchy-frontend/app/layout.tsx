@@ -1,20 +1,36 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Onest, Instrument_Serif, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const onest = Onest({
+  variable: "--font-onest",
   subsets: ["latin"],
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const instrumentSerif = Instrument_Serif({
+  weight: "400",
+  variable: "--font-instrument",
   subsets: ["latin"],
+  display: "swap",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-plex",
+  subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
-  title: "Sketchy",
-  description: "Real-time collaborative whiteboard",
+  title: "Sketchy — a whiteboard you can all draw on",
+  description:
+    "Sketchy is a real-time collaborative whiteboard. Every stroke lands on every screen, the second it lands on yours.",
+  openGraph: {
+    title: "Sketchy — a whiteboard you can all draw on",
+    description:
+      "A real-time collaborative whiteboard. Every stroke lands on every screen, instantly.",
+    type: "website",
+  },
 };
 
 export default function RootLayout({
@@ -25,7 +41,8 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        suppressHydrationWarning
+        className={`${onest.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable} antialiased`}
       >
         {children}
       </body>

@@ -1,26 +1,283 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --paper: #f8f6f1;
+  --paper-2: #efede5;
+  --ink: #18181a;
+  --ink-soft: #5f615a;
+  --ink-faint: #8f9087;
+  --line: #e0ddd3;
+  --line-soft: #ebe9e0;
+  --marker: #3a3ff2;
+  --marker-soft: #4a4ff466;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-paper: var(--paper);
+  --color-paper-2: var(--paper-2);
+  --color-ink: var(--ink);
+  --color-inksoft: var(--ink-soft);
+  --color-inkfaint: var(--ink-faint);
+  --color-line: var(--line);
+  --color-linesoft: var(--line-soft);
+  --color-marker: var(--marker);
+  --font-sans: var(--font-onest), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-instrument), Georgia, serif;
+  --font-mono: var(--font-plex), ui-monospace, "SF Mono", monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-onest), ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: var(--marker);
+    color: var(--paper);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--marker);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer components {
+  /* ————— Drafting-paper texture: fine grid under everything ————— */
+  .board-grid {
+    background-image: linear-gradient(var(--ink) 1px, transparent 1px),
+      linear-gradient(90deg, var(--ink) 1px, transparent 1px);
+    background-size: clamp(3rem, 8vw, 6rem) clamp(3rem, 8vw, 6rem);
+    background-position: -1px -1px;
+  }
+
+  .board-grid::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: var(--marker);
+    mix-blend-mode: soft-light;
+    opacity: 0.04;
+  }
+
+  /* hairline rules */
+  .hairline {
+    border-color: var(--line);
+  }
+
+  .hairline-b {
+    border-bottom: 1px solid var(--line);
+  }
+  .hairline-t {
+    border-top: 1px solid var(--line);
+  }
+
+  /* ————— eyebrow / mono annotations like a drawing's legends ————— */
+  .anno {
+    font-family: var(--font-plex), ui-monospace, monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  /* ————— the marker underline, drawn by a scaleX reveal ————— */
+  .underline-marker {
+    position: relative;
+    display: inline-block;
+  }
+
+  .underline-marker span.u-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -0.06em;
+    height: 0.16em;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--marker), #7c80f8 120%);
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .underline-marker.is-on span.u-line {
+    transform: scaleX(1);
+  }
+
+  /* ————— buttons ————— */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.55rem;
+    font-family: var(--font-onest), sans-serif;
+    font-weight: 600;
+    font-size: 0.92rem;
+    letter-spacing: -0.01em;
+    border-radius: 10px;
+    padding: 0.72rem 1.15rem;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition:
+      transform 150ms ease,
+      box-shadow 150ms ease,
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease;
+    user-select: none;
+  }
+
+  .btn:active {
+    transform: translateY(1px);
+  }
+
+  .btn-ink {
+    background: var(--ink);
+    color: var(--paper);
+    border-color: var(--ink);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset;
+  }
+  .btn-ink:hover {
+    background: #2c2c30;
+    transform: translateY(-1px);
+    box-shadow: 0 10px 24px -12px rgba(24, 24, 26, 0.55);
+  }
+
+  .btn-paper {
+    background: transparent;
+    color: var(--ink);
+    border-color: var(--line-strong);
+  }
+  .btn-paper:hover {
+    border-color: var(--ink);
+    box-shadow: 0 10px 24px -16px rgba(24, 24, 26, 0.4);
+  }
+
+  .btn-marker {
+    background: var(--marker);
+    color: #fff;
+    border-color: var(--marker);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.14) inset,
+      0 12px 28px -14px var(--marker);
+  }
+  .btn-marker:hover {
+    background: var(--marker-soft);
+    transform: translateY(-1px);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--ink);
+    border-color: transparent;
+  }
+  .btn-ghost:hover {
+    background: var(--paper-2);
+  }
+
+  /* ————— soft card ————— */
+  .card {
+    background: rgba(248, 246, 241, 0.72);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  /* ————— corners tick (measure marks) ————— */
+  .corner-marks {
+    position: relative;
+  }
+  .corner-marks::before,
+  .corner-marks::after {
+    content: "";
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border-color: var(--ink-faint);
+    border-style: solid;
+  }
+  .corner-marks::before {
+    top: 10px;
+    left: 10px;
+    border-width: 1px 0 0 1px;
+  }
+  .corner-marks::after {
+    bottom: 10px;
+    right: 10px;
+    border-width: 0 1px 1px 0;
+  }
+
+  /* ————— the interactive doodle pad ————— */
+  .duck-pad {
+    cursor: crosshair;
+    touch-action: none;
+    background: var(--paper);
+  }
+  .duck-pad:active {
+    cursor: crosshair;
+  }
+
+  /* ————— soft marquee ————— */
+  .marquee-track {
+    animation: marquee 34s linear infinite;
+    will-change: transform;
+  }
+  .marquee:hover .marquee-track {
+    animation-play-state: paused;
+  }
+
+  @keyframes marquee {
+    to {
+      transform: translateX(-50%);
+    }
+  }
+
+  /* — small ambient pulse for the "live" dot ————— */
+  .live-dot {
+    box-shadow: 0 0 0 0 rgba(58, 63, 242, 0.45);
+    animation: livePulse 2.4s ease-out infinite;
+  }
+  @keyframes livePulse {
+    0% {
+      box-shadow: 0 0 0 0 rgba(58, 63, 242, 0.4);
+    }
+    70% {
+      box-shadow: 0 0 0 9px rgba(58, 63, 242, 0);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(58, 63, 242, 0);
+    }
+  }
+
+  /* — vertical/measured scrollbar ————— */
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--paper);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line);
+    border: 3px solid var(--paper);
+    border-radius: 999px;
+  }
 }
