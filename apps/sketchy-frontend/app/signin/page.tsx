@@ -1,9 +1,10 @@
+import { Suspense } from "react";
 import { AuthPage } from "../components/AuthPage";
 
-import React from 'react'
-
-function page() {
-  return <AuthPage isSignin={true} />;
+export default function SignInPage() {
+  return (
+    <Suspense>
+      <AuthPage isSignin={true} />
+    </Suspense>
+  );
 }
-
-export default page
