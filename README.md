@@ -9,8 +9,8 @@ Turborepo + pnpm monorepo:
 | App / Package | Purpose |
 |---|---|
 | `apps/sketchy-frontend` | Next.js 15 (App Router) frontend, canvas engine, auth UI |
-| `apps/http-backend` | Express 5 REST API (port 8080): signup/signin/rooms/chats/shapes |
-| `apps/ws-backend` | WebSocket server (`ws`, port 8000): realtime broadcast + persistence |
+| `apps/http-backend` | Express 5 REST API (port 8380): signup/signin/rooms/chats/shapes |
+| `apps/ws-backend` | WebSocket server (`ws`, port 8381): realtime broadcast + persistence |
 | `packages/db` | Prisma schema + client (`@repo/db/client`) |
 | `packages/common` | Shared zod schemas (`@repo/common/types`) |
 | `packages/backend-common` | Shared JWT secret + password hashing (`@repo/backend-common/config`) |
@@ -50,8 +50,8 @@ DATABASE_URL=postgresql://user:pass@host/db?sslmode=require
 pnpm dev
 
 # or individually
-pnpm --filter ws-backend dev        # ws://localhost:8000
-pnpm --filter http-backend dev      # http://localhost:8080
+pnpm --filter ws-backend dev        # ws://localhost:8381
+pnpm --filter http-backend dev      # http://localhost:8380
 pnpm --filter sketchy-frontend dev  # http://localhost:3000
 ```
 

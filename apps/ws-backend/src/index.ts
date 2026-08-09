@@ -11,7 +11,9 @@ import type { User } from "./rooms.js";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
-const wss = new WebSocketServer({ port: 8000 });
+const port = Number(process.env.PORT_WS) || 8381;
+const wss = new WebSocketServer({ port });
+wss.on("listening", () => console.log(`WebSocket server listening on port ${port}`));
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -164,6 +166,26 @@ wss.on("connection", function connection(ws, request) {
       broadcast(roomId, {
         type: "shape",
         shape: payload,
+        roomId: roomId.toString(),
+      });
+    }
+
+    if (type === "clear") {
+      if (roomId === null) {
+        return;
+      }
+
+      try {
+        await prismaClient.shape.deleteMany({
+          where: { roomId },
+        });
+      } catch (error) {
+        console.error("Failed to clear shapes:", error);
+        return;
+      }
+
+      broadcast(roomId, {
+        type: "clear",
         roomId: roomId.toString(),
       });
     }

@@ -15,7 +15,7 @@ import {
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
 const app = express();
-const port = 8080;
+const port = Number(process.env.PORT_HTTP) || 8380;
 
 app.use(
   cors({
