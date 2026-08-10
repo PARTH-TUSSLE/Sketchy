@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import Jwt from "jsonwebtoken";
+import Jwt, { type JwtPayload } from "jsonwebtoken";
 import { middleware } from "./middleware.js";
 import { rateLimiter } from "./rateLimit.js";
 import { getJwtSecret, hashPassword, verifyPassword } from "@repo/backend-common/config";
@@ -77,7 +77,51 @@ app.post("/signin", rateLimiter, async (req, res) => {
   const token = Jwt.sign({ userId: user.id }, getJwtSecret(), {
     expiresIn: "2h",
   });
-  res.json({ token });
+  const refreshToken = Jwt.sign(
+    { userId: user.id, type: "refresh" },
+    getJwtSecret(),
+    { expiresIn: "30d" }
+  );
+  res.json({ token, refreshToken });
+});
+
+// Swap a still-valid refresh token for a fresh access token (and a fresh
+// refresh token), so long-lived whiteboard sessions never hard-stop at the
+// two-hour mark. Each exchange issues a new pair, keeping the stored session
+// forward-renewed rather than accumulating indefinitely.
+app.post("/auth/refresh", rateLimiter, async (req, res) => {
+  const { refreshToken } = req.body ?? {};
+  if (typeof refreshToken !== "string" || refreshToken.length === 0) {
+    return res.status(400).json({ msg: "Missing refresh token" });
+  }
+
+  let payload: JwtPayload;
+  try {
+    payload = Jwt.verify(refreshToken, getJwtSecret()) as JwtPayload;
+  } catch {
+    return res.status(401).json({ msg: "Invalid or expired refresh token" });
+  }
+
+  if (payload?.type !== "refresh" || typeof payload.userId !== "string") {
+    return res.status(401).json({ msg: "Invalid refresh token" });
+  }
+
+  const user = await prismaClient.user.findUnique({
+    where: { id: payload.userId },
+  });
+  if (!user) {
+    return res.status(401).json({ msg: "Account no longer exists" });
+  }
+
+  const nextToken = Jwt.sign({ userId: user.id }, getJwtSecret(), {
+    expiresIn: "2h",
+  });
+  const nextRefresh = Jwt.sign(
+    { userId: user.id, type: "refresh" },
+    getJwtSecret(),
+    { expiresIn: "30d" }
+  );
+  res.json({ token: nextToken, refreshToken: nextRefresh });
 });
 
 app.post("/room", middleware, async (req, res) => {

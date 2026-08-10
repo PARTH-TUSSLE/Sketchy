@@ -5,7 +5,7 @@ import axios from "axios";
 import { TriangleAlert, RefreshCw } from "lucide-react";
 import { BACKEND_URL, WS_URL } from "../config";
 import Canvas from "../components/Canvas";
-import { getToken } from "../lib/auth";
+import { ensureFreshToken, scheduleTokenRefresh } from "../lib/auth";
 
 type ConnState =
   | { status: "connecting" }
@@ -73,10 +73,16 @@ export default function RoomCanvas({ roomId }: { roomId: string }) {
     let disposed = false;
     let socket: WebSocket | null = null;
 
-    const open = (n: number) => {
-      const token = getToken();
+    // Keep the session renewed while this page is open, so an idle tab never
+    // hits a dead access token on the next reconnect or reload.
+    scheduleTokenRefresh();
+
+    const open = async (n: number) => {
+      // Refresh the token first — the previous one may have lapsed during a
+      // long idle stretch on the board.
+      const token = await ensureFreshToken();
       if (!token) {
-        setConn({ status: "no-token" });
+        if (!disposed) setConn({ status: "no-token" });
         return;
       }
       if (roomIdNum === null) return;
@@ -162,11 +168,12 @@ export default function RoomCanvas({ roomId }: { roomId: string }) {
 
   if (conn.status === "network") {
     return (
-      <Shell title="The studio is unreachable right now">
+      <Shell title="The room went quiet for a moment">
         <p>
-          We tried {MAX_RETRIES} times and the studio didn&apos;t answer. Make
-          sure the ws-backend (port 8381) is running, then reconnect. Your
-          drawing is safe — it lives on the server.
+          We couldn&apos;t reach the studio just now, so joining is paused on
+          our side. No drawing is lost — everything you sketched is safe and
+          will still be on the board when we&apos;re back. Give it another go
+          whenever you&apos;re ready.
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <button onClick={retry} className="btn btn-ink">

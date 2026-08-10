@@ -6,7 +6,7 @@ import Link from "next/link";
 import axios from "axios";
 import { ArrowRight, Loader2 } from "lucide-react";
 import { BACKEND_URL } from "../config";
-import { setToken } from "../lib/auth";
+import { setSession, scheduleTokenRefresh } from "../lib/auth";
 
 export function AuthPage({ isSignin }: { isSignin: boolean }) {
   const router = useRouter();
@@ -43,11 +43,18 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
           email: form.email,
           password: form.password,
         });
-        setToken(signinRes.data.token);
+        setSession({
+          token: signinRes.data.token,
+          refreshToken: signinRes.data.refreshToken,
+        });
       } else {
-        setToken(res.data.token);
+        setSession({
+          token: res.data.token,
+          refreshToken: res.data.refreshToken,
+        });
       }
 
+      scheduleTokenRefresh();
       router.push(next ?? "/new-room");
     } catch (err: unknown) {
       const responseMsg = axios.isAxiosError(err)

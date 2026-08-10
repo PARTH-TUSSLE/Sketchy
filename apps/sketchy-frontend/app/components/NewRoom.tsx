@@ -6,14 +6,22 @@ import Link from "next/link";
 import axios from "axios";
 import { ArrowRight, Loader2, LogIn } from "lucide-react";
 import { BACKEND_URL } from "../config";
-import { getToken } from "../lib/auth";
+import { ensureFreshToken, scheduleTokenRefresh } from "../lib/auth";
 
 export function NewRoom() {
   const router = useRouter();
   const [authed, setAuthed] = useState<boolean | null>(null);
 
   useEffect(() => {
-    setAuthed(Boolean(getToken()));
+    let stale = false;
+    scheduleTokenRefresh();
+    (async () => {
+      const token = await ensureFreshToken();
+      if (!stale) setAuthed(Boolean(token));
+    })();
+    return () => {
+      stale = true;
+    };
   }, []);
 
   if (authed === null) {
@@ -45,7 +53,7 @@ function CreateRoomFlow({
       return;
     }
 
-    const token = getToken();
+    const token = await ensureFreshToken();
     if (!token) {
       setError("You need to sign in first.");
       return;
