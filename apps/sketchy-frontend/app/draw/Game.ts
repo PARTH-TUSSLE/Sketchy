@@ -3,6 +3,7 @@ import { getExistingShapes } from "./http";
 
 export type Shape =
   | {
+      id: string;
       type: "rect";
       x: number;
       y: number;
@@ -11,6 +12,7 @@ export type Shape =
       color: string;
     }
   | {
+      id: string;
       type: "circle";
       centerX: number;
       centerY: number;
@@ -18,6 +20,7 @@ export type Shape =
       color: string;
     }
   | {
+      id: string;
       type: "pencil";
       points: { x: number; y: number }[];
       color: string;
@@ -87,6 +90,9 @@ export class Game {
   private remoteCursors = new Map<string, RemoteCursor>();
   private lastPointerSent = 0;
 
+  // Eraser: id of the shape currently under the cursor, if any.
+  private hoveredShapeId: string | null = null;
+
   private onViewChange: ((view: ViewState) => void) | null;
 
   constructor(
@@ -111,8 +117,12 @@ export class Game {
     this.init().catch((err) => console.error("init() failed:", err));
   }
 
-  setTool(tool: "rect" | "circle" | "pencil") {
+  setTool(tool: Tool) {
     this.selectedTool = tool;
+    if (tool !== "eraser" && this.hoveredShapeId !== null) {
+      this.hoveredShapeId = null;
+      this.clearCanvas();
+    }
   }
 
   setColor(color: string) {
@@ -261,6 +271,14 @@ export class Game {
       } else if (message.type === "clear") {
         this.existingShapes = [];
         this.clearCanvas();
+      } else if (message.type === "erase" && message.shapeId) {
+        this.existingShapes = this.existingShapes.filter(
+          (s) => s.id !== message.shapeId
+        );
+        if (this.hoveredShapeId === message.shapeId) {
+          this.hoveredShapeId = null;
+        }
+        this.clearCanvas();
       } else if (message.type === "pointer") {
         this.remoteCursors.set(message.userId, {
           name: message.name,
@@ -316,6 +334,66 @@ export class Game {
     );
   }
 
+  // Eraser: remove whatever shape is under a world-space point and tell the
+  // room so the deletion lands for everyone at the same time.
+  private eraseShapeAt(wx: number, wy: number) {
+    const target = this.shapeAt(wx, wy);
+    if (!target) return;
+    this.existingShapes = this.existingShapes.filter((s) => s.id !== target.id);
+    // Uncover whatever line was underneath so the cursor can keep erasing.
+    const next = this.shapeAt(wx, wy);
+    this.hoveredShapeId = next?.id ?? null;
+    this.clearCanvas();
+    this.socket.send(
+      JSON.stringify({
+        type: "erase",
+        shapeId: target.id,
+        roomId: this.roomId,
+      })
+    );
+  }
+
+  // Topmost shape that contains (or is near) a world-space point.
+  private shapeAt(wx: number, wy: number): Shape | null {
+    for (let i = this.existingShapes.length - 1; i >= 0; i--) {
+      const s = this.existingShapes[i]!;
+      if (this.hitShape(s, wx, wy)) return s;
+    }
+    return null;
+  }
+
+  // A shape counts as "hit" when the cursor is on the ink or within a small
+  // screen-space margin, so thin strokes stay grabbable even when zoomed out.
+  private hitShape(s: Shape, wx: number, wy: number): boolean {
+    const m = 5 / this.zoom;
+    if (s.type === "rect") {
+      const minX = Math.min(s.x, s.x + s.width) - m;
+      const maxX = Math.max(s.x, s.x + s.width) + m;
+      const minY = Math.min(s.y, s.y + s.height) - m;
+      const maxY = Math.max(s.y, s.y + s.height) + m;
+      return wx >= minX && wx <= maxX && wy >= minY && wy <= maxY;
+    }
+    if (s.type === "circle") {
+      const dx = wx - s.centerX;
+      const dy = wy - s.centerY;
+      return dx * dx + dy * dy <= (s.radius + m) * (s.radius + m);
+    }
+    const pts = s.points;
+    if (pts.length === 1) return Math.hypot(wx - pts[0]!.x, wy - pts[0]!.y) <= m;
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (distToSegment(pts[i]!, pts[i + 1]!, wx, wy) <= m) return true;
+    }
+    return false;
+  }
+
+  private updateHover(wx: number, wy: number) {
+    const nextId = this.selectedTool === "eraser" ? this.shapeAt(wx, wy)?.id ?? null : null;
+    if (nextId !== this.hoveredShapeId) {
+      this.hoveredShapeId = nextId;
+      this.clearCanvas();
+    }
+  }
+
   clearCanvas() {
     const w = this.canvas.clientWidth || 1;
     const h = this.canvas.clientHeight || 1;
@@ -331,6 +409,9 @@ export class Game {
     this.existingShapes.map((shape) => {
       this.drawShape(shape);
     });
+
+    // In eraser mode, flag the line under the cursor before it is erased.
+    this.drawHoveredShape();
 
     // Presence cursors live in screen space on top of the paper.
     this.drawRemoteCursors();
@@ -462,6 +543,37 @@ export class Game {
     }
   }
 
+  private drawHoveredShape() {
+    const s = this.existingShapes.find((x) => x.id === this.hoveredShapeId);
+    if (!s) return;
+    this.ctx.save();
+    this.ctx.strokeStyle = "rgba(224, 49, 49, 0.95)";
+    this.ctx.fillStyle = "rgba(224, 49, 49, 0.1)";
+    this.ctx.lineWidth = 3 / this.zoom;
+    this.ctx.setLineDash([7 / this.zoom, 5 / this.zoom]);
+    if (s.type === "rect") {
+      this.ctx.fillRect(s.x, s.y, s.width, s.height);
+      this.ctx.strokeRect(s.x, s.y, s.width, s.height);
+    } else if (s.type === "circle") {
+      this.ctx.beginPath();
+      this.ctx.arc(s.centerX, s.centerY, s.radius, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.stroke();
+      this.ctx.closePath();
+    } else if (s.type === "pencil") {
+      if (s.points.length >= 2) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(s.points[0]!.x, s.points[0]!.y);
+        for (let i = 1; i < s.points.length; i++) {
+          this.ctx.lineTo(s.points[i]!.x, s.points[i]!.y);
+        }
+        this.ctx.stroke();
+        this.ctx.closePath();
+      }
+    }
+    this.ctx.restore();
+  }
+
   private shapeBounds(s: Shape) {
     if (s.type === "rect") {
       return { minX: s.x, minY: s.y, maxX: s.x + s.width, maxY: s.y + s.height };
@@ -519,9 +631,11 @@ export class Game {
     const selectedTool = this.selectedTool;
 
     let shape: Shape | null = null;
+    const id = newShapeId();
 
     if (selectedTool === "rect") {
       shape = {
+        id,
         type: "rect",
         x: this.startX,
         y: this.startY,
@@ -532,6 +646,7 @@ export class Game {
     } else if (selectedTool === "circle") {
       const radius = Math.max(Math.abs(width), Math.abs(height)) / 2;
       shape = {
+        id,
         type: "circle",
         radius: radius,
         centerX: this.startX + width / 2,
@@ -540,6 +655,7 @@ export class Game {
       };
     } else if (selectedTool === "pencil") {
       shape = {
+        id,
         type: "pencil",
         points: this.points,
         color: this.strokeColor,
@@ -581,6 +697,13 @@ export class Game {
     this.startX = p.x;
     this.startY = p.y;
     this.points = [{ x: p.x, y: p.y }];
+
+    // The eraser is a click tool: lift whatever line is under the cursor.
+    if (this.selectedTool === "eraser") {
+      this.clicked = false;
+      this.eraseShapeAt(p.x, p.y);
+      return;
+    }
   };
 
   mouseMoveHandler = (e: MouseEvent) => {
@@ -593,6 +716,7 @@ export class Game {
       return;
     }
     if (!this.clicked) {
+      if (this.selectedTool === "eraser") this.updateHover(p.x, p.y);
       return;
     }
     const width = p.x - this.startX;
@@ -675,6 +799,31 @@ export class Game {
 
 function canvasCenter(canvas: HTMLCanvasElement) {
   return { x: (canvas.clientWidth || 1) / 2, y: (canvas.clientHeight || 1) / 2 };
+}
+
+// Stable per-stroke identity so an eraser can name the exact line to delete,
+// even before the server round-trip for the freshly drawn shape resolves.
+function newShapeId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+// Shortest Euclidean distance from point (px, py) to segment a–b.
+function distToSegment(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  px: number,
+  py: number
+): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(px - a.x, py - a.y);
+  let t = ((px - a.x) * dx + (py - a.y) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
 }
 
 function screenPoint(canvas: HTMLCanvasElement, clientX: number, clientY: number) {

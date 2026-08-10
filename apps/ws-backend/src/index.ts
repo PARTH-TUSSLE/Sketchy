@@ -231,6 +231,39 @@ wss.on("connection", function connection(ws, request) {
       });
     }
 
+    if (type === "erase") {
+      const shapeId = parsedData?.shapeId;
+      if (roomId === null || typeof shapeId !== "string" || shapeId.length === 0) {
+        return;
+      }
+
+      try {
+        // New strokes are keyed by the client uuid stored inside payload.id;
+        // legacy strokes loaded before the eraser existed carry only the row's
+        // numeric id, so match on whichever the client is talking about.
+        const numericId = /^\d+$/.test(shapeId) ? Number(shapeId) : null;
+        await prismaClient.shape.deleteMany({
+          where: {
+            roomId,
+            OR: [
+              { payload: { path: ["id"], equals: shapeId } },
+              ...(numericId !== null ? [{ id: numericId }] : []),
+            ],
+          },
+        });
+      } catch (error) {
+        console.error("Failed to erase shape:", error);
+        return;
+      }
+
+      broadcast(roomId, {
+        type: "erase",
+        shapeId,
+        roomId: roomId.toString(),
+      });
+      return;
+    }
+
     if (type === "clear") {
       if (roomId === null) {
         return;

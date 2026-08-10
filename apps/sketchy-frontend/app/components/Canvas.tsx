@@ -11,6 +11,7 @@ import {
   Hand,
   Pencil,
   RectangleHorizontal,
+  Trash2,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -79,6 +80,7 @@ export default function Canvas({
       if (e.key === "v" || e.key === "P" || e.key === "p") selectTool("pencil");
       else if (e.key === "r" || e.key === "R") selectTool("rect");
       else if (e.key === "c" || e.key === "C") selectTool("circle");
+      else if (e.key === "e" || e.key === "E") selectTool("eraser");
       else if (e.key === "h" || e.key === "H") setPanMode((m) => !m);
       else if (e.key === "+" || e.key === "=") game?.zoomIn();
       else if (e.key === "-" || e.key === "_") game?.zoomOut();
@@ -183,6 +185,13 @@ export default function Canvas({
             label="Circle (C)"
             onClick={() => selectTool("circle")}
           />
+          <IconButton
+            tone="dark"
+            activated={selectedTool === "eraser"}
+            icon={<Eraser size={18} />}
+            label="Eraser (E)"
+            onClick={() => selectTool("eraser")}
+          />
           <span className="mx-1.5 h-6 w-px bg-white/10" />
           <IconButton
             tone="dark"
@@ -213,8 +222,8 @@ export default function Canvas({
           <IconButton
             tone="dark"
             activated={false}
-            icon={<Eraser size={18} />}
-            label="Clear board"
+            icon={<Trash2 size={18} />}
+            label="Clear entire board"
             onClick={() => game?.clearBoard()}
           />
         </div>
@@ -226,6 +235,7 @@ export default function Canvas({
             {!panMode && selectedTool === "pencil" && "p — freehand stroke"}
             {!panMode && selectedTool === "rect" && "r — bounding box"}
             {!panMode && selectedTool === "circle" && "c — circumscribe"}
+            {!panMode && selectedTool === "eraser" && "e — erase a stroke"}
           </span>
           <span className="anno ml-3 text-paper/25">1–9 ink · space pan · ⌃+scroll zoom</span>
         </div>
@@ -286,4 +296,4 @@ export default function Canvas({
   );
 }
 
-export type Tool = "pencil" | "rect" | "circle";
+export type Tool = "pencil" | "rect" | "circle" | "eraser";

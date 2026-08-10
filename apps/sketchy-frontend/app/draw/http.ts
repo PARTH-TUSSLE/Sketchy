@@ -16,5 +16,13 @@ export async function getExistingShapes(roomId: string): Promise<Shape[]> {
     payload: Shape;
   }[];
 
-  return shapes.map((s) => s.payload);
+  // Backfill a stable identity for shapes persisted before the eraser existed
+  // (their payload has no id) using the row's own numeric id — otherwise the
+  // eraser would mistake every legacy shape for "the same shapeless line" and
+  // wipe the whole board in one click.
+  return shapes.map((s) => {
+    const payload = s.payload;
+    if (typeof payload.id === "string" && payload.id.length > 0) return payload;
+    return { ...payload, id: String(s.id) };
+  });
 }
