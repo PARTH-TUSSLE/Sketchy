@@ -4,7 +4,9 @@ export interface User {
   ws: WebSocket;
   rooms: number[];
   userId: string;
+  name: string;
   isAlive: boolean;
+  lastPointer?: { x: number; y: number };
 }
 
 export function joinRoom(user: User, roomId: number): User {

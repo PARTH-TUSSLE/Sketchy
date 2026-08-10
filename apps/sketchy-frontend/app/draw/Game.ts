@@ -45,9 +45,15 @@ export interface ViewState {
   offsetY: number;
 }
 
+interface RemoteCursor {
+  name: string;
+  x: number | null;
+  y: number | null;
+}
+
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
-const ZOOM_FACTOR = 1.12;
+const ZOOM_FACTOR = 1.08;
 const GRID_STEP = 48;
 // The drawing board is a giant but finite sheet — panning stops at these edges.
 const WORLD_LIMIT = 10000;
@@ -76,6 +82,10 @@ export class Game {
   private spaceDown = false;
   private panLastX = 0;
   private panLastY = 0;
+
+  // Presence: everyone else's cursors, keyed by userId, with their name.
+  private remoteCursors = new Map<string, RemoteCursor>();
+  private lastPointerSent = 0;
 
   private onViewChange: ((view: ViewState) => void) | null;
 
@@ -251,8 +261,51 @@ export class Game {
       } else if (message.type === "clear") {
         this.existingShapes = [];
         this.clearCanvas();
+      } else if (message.type === "pointer") {
+        this.remoteCursors.set(message.userId, {
+          name: message.name,
+          x: message.x,
+          y: message.y,
+        });
+        this.clearCanvas();
+      } else if (message.type === "presence_members") {
+        (message.members || []).forEach((m: { userId: string; name: string; x: number | null; y: number | null }) => {
+          this.setRemoteCursor(m.userId, m.name, m.x, m.y);
+        });
+        this.clearCanvas();
+      } else if (message.type === "presence_enter") {
+        this.setRemoteCursor(message.userId, message.name, message.x, message.y);
+      } else if (message.type === "presence_leave") {
+        this.remoteCursors.delete(message.userId);
+        this.clearCanvas();
       }
     };
+  }
+
+  // Merge instead of overwrite so a roster refresh never blanks a cursor we
+  // already have a live position for.
+  private setRemoteCursor(
+    userId: string,
+    name: string,
+    x: number | null,
+    y: number | null
+  ) {
+    const existing = this.remoteCursors.get(userId);
+    this.remoteCursors.set(userId, {
+      name: name || existing?.name || "guest",
+      x: x ?? existing?.x ?? null,
+      y: y ?? existing?.y ?? null,
+    });
+  }
+
+  // Throttled pointer telemetry so the room sees our cursor.
+  sendPointer(x: number, y: number) {
+    const now = Date.now();
+    if (now - this.lastPointerSent < 35) return;
+    this.lastPointerSent = now;
+    this.socket.send(
+      JSON.stringify({ type: "pointer", roomId: this.roomId, x, y })
+    );
   }
 
   clearBoard() {
@@ -278,6 +331,74 @@ export class Game {
     this.existingShapes.map((shape) => {
       this.drawShape(shape);
     });
+
+    // Presence cursors live in screen space on top of the paper.
+    this.drawRemoteCursors();
+
+    // The caller (in-progress drag previews) draws in world space, so always
+    // leave the context in the world transform — never a leaked screen one.
+    this.applyWorldTransform();
+  }
+
+  private drawRemoteCursors() {
+    if (this.remoteCursors.size === 0) return;
+    const cw = this.canvas.clientWidth || 1;
+    const ch = this.canvas.clientHeight || 1;
+    this.ctx.save();
+    this.ctx.setTransform(this.scale, 0, 0, this.scale, 0, 0);
+    this.remoteCursors.forEach((c) => {
+      if (c.x === null || c.y === null) return;
+      const sx = (c.x - this.offsetX) * this.zoom;
+      const sy = (c.y - this.offsetY) * this.zoom;
+      if (sx < -60 || sx > cw + 60 || sy < -40 || sy > ch + 40) return;
+      this.drawPresenceCursor(sx, sy, c.name);
+    });
+    this.ctx.restore();
+  }
+
+  private drawPresenceCursor(sx: number, sy: number, name: string) {
+    const color = presenceColor(name);
+    this.ctx.fillStyle = color;
+    // Cursor arrow, tip at (sx, sy).
+    this.ctx.beginPath();
+    this.ctx.moveTo(sx, sy);
+    this.ctx.lineTo(sx + 12, sy + 15);
+    this.ctx.lineTo(sx + 8, sy + 16);
+    this.ctx.lineTo(sx + 10, sy + 24);
+    this.ctx.lineTo(sx + 6.5, sy + 23);
+    this.ctx.lineTo(sx + 4.5, sy + 17);
+    this.ctx.closePath();
+    this.ctx.fill();
+    this.ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    this.ctx.lineWidth = 1;
+    this.ctx.stroke();
+
+    // Name pill plate.
+    const label = name || "guest";
+    const px = sx + 16;
+    const py = sy + 12;
+    this.ctx.font = "600 12px ui-sans-serif, system-ui, sans-serif";
+    const text = label;
+    const textW = this.ctx.measureText(text).width;
+    const pillW = textW + 12 + 20;
+    const pillH = 20;
+    this.ctx.fillStyle = "rgba(28, 28, 36, 0.92)";
+    this.ctx.beginPath();
+    this.ctx.roundRect(px, py, pillW, pillH, 6);
+    this.ctx.fill();
+
+    // Initial chip.
+    this.ctx.fillStyle = color;
+    this.ctx.beginPath();
+    this.ctx.arc(px + 10, py + pillH / 2, 7, 0, Math.PI * 2);
+    this.ctx.fill();
+    this.ctx.fillStyle = "#fff";
+    this.ctx.textAlign = "center";
+    this.ctx.textBaseline = "middle";
+    this.ctx.fillText(label.charAt(0).toUpperCase(), px + 10, py + pillH / 2 + 0.5);
+    this.ctx.textAlign = "left";
+    this.ctx.textBaseline = "alphabetic";
+    this.ctx.fillText(text, px + 24, py + 14);
   }
 
   private applyWorldTransform() {
@@ -463,6 +584,8 @@ export class Game {
   };
 
   mouseMoveHandler = (e: MouseEvent) => {
+    const p = this.mapToCanvas(e.clientX, e.clientY);
+    this.sendPointer(p.x, p.y);
     if (this.panning) {
       this.panBy(e.clientX - this.panLastX, e.clientY - this.panLastY);
       this.panLastX = e.clientX;
@@ -472,12 +595,13 @@ export class Game {
     if (!this.clicked) {
       return;
     }
-    const p = this.mapToCanvas(e.clientX, e.clientY);
     const width = p.x - this.startX;
     const height = p.y - this.startY;
     this.clearCanvas();
     this.ctx.strokeStyle = this.strokeColor;
     this.ctx.lineWidth = 2 / this.zoom;
+    this.ctx.lineCap = "round";
+    this.ctx.lineJoin = "round";
     const selectedTool = this.selectedTool;
     if (selectedTool === "rect") {
       this.ctx?.strokeRect(this.startX, this.startY, width, height);
@@ -505,6 +629,7 @@ export class Game {
   wheelHandler = (e: WheelEvent) => {
     e.preventDefault();
     if (e.ctrlKey || e.metaKey || e.altKey) {
+      // Scroll up zooms in, scroll down zooms out — one notch = ZOOM_FACTOR.
       const anchor = screenPoint(this.canvas, e.clientX, e.clientY);
       const factor = e.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
       this.applyZoom(this.zoom * factor, anchor);
@@ -555,4 +680,13 @@ function canvasCenter(canvas: HTMLCanvasElement) {
 function screenPoint(canvas: HTMLCanvasElement, clientX: number, clientY: number) {
   const rect = canvas.getBoundingClientRect();
   return { x: clientX - rect.left, y: clientY - rect.top };
+}
+
+// Stable per-user accent colour derived from their name.
+function presenceColor(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) {
+    h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  }
+  return `hsl(${h % 360}, 72%, 52%)`;
 }

@@ -4,7 +4,7 @@ import { joinRoom, leaveRoom } from "../src/rooms.ts";
 import type { User } from "../src/rooms.ts";
 
 function makeUser(rooms: number[] = []): User {
-  return { ws: {} as any, rooms, userId: "u1", isAlive: true };
+  return { ws: {} as any, rooms, userId: "u1", name: "tester", isAlive: true };
 }
 
 test("joinRoom adds a room once", () => {

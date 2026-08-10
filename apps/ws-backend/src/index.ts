@@ -68,20 +68,23 @@ wss.on("connection", function connection(ws, request) {
     return;
   }
 
-  // Remove any stale connection for the same socket
-  const existing = users.find((x) => x.ws === ws);
-  if (existing) {
-    users.splice(users.indexOf(existing), 1);
-  }
-
-  const user: User = { userId, rooms: [], ws, isAlive: true };
+  const user: User = { userId, rooms: [], ws, name: "guest", isAlive: true };
   users.push(user);
+
+  ws.send(JSON.stringify({ type: "self", userId, name: user.name }));
 
   ws.on("pong", () => {
     user.isAlive = true;
   });
 
-  ws.on("message", async function message(data) {
+  // Incoming messages are queued until the display name loads, so the client's
+  // very first join_room — fired the instant the socket opens — is never
+  // dropped (that left users absent from the room and killed live updates),
+  // and presence labels never start out as "guest".
+  const pending: string[] = [];
+  let ready = false;
+
+  const message = async (data: unknown) => {
     let parsedData: any;
     try {
       parsedData = JSON.parse(data as unknown as string);
@@ -99,6 +102,34 @@ wss.on("connection", function connection(ws, request) {
       }
       const next = joinRoom(user, roomId);
       user.rooms = next.rooms;
+
+      // Hand the newcomer the room roster already sat at the table, with the
+      // last known cursor position so their labels render immediately.
+      const members = users
+        .filter((u) => u !== user && u.rooms.includes(roomId))
+        .map((u) => ({
+          userId: u.userId,
+          name: u.name,
+          x: u.lastPointer?.x ?? null,
+          y: u.lastPointer?.y ?? null,
+        }));
+      ws.send(
+        JSON.stringify({ type: "presence_members", roomId, members })
+      );
+
+      // …and tell everyone already here who just arrived.
+      broadcast(
+        roomId,
+        {
+          type: "presence_enter",
+          roomId,
+          userId: user.userId,
+          name: user.name,
+          x: user.lastPointer?.x ?? null,
+          y: user.lastPointer?.y ?? null,
+        },
+        except(ws)
+      );
       return;
     }
 
@@ -109,6 +140,36 @@ wss.on("connection", function connection(ws, request) {
       // useRoom() keeps every room except the one being left (fixes the "keep the wrong room" bug)
       const next = leaveRoom(user, roomId);
       user.rooms = next.rooms;
+      broadcast(
+        roomId,
+        { type: "presence_leave", roomId, userId: user.userId },
+        except(ws)
+      );
+      return;
+    }
+
+    if (type === "pointer") {
+      if (roomId === null) {
+        return;
+      }
+      const x = Number(parsedData?.x);
+      const y = Number(parsedData?.y);
+      if (!isFinite(x) || !isFinite(y)) {
+        return;
+      }
+      user.lastPointer = { x, y };
+      broadcast(
+        roomId,
+        {
+          type: "pointer",
+          roomId,
+          userId: user.userId,
+          name: user.name,
+          x,
+          y,
+        },
+        except(ws)
+      );
       return;
     }
 
@@ -189,20 +250,58 @@ wss.on("connection", function connection(ws, request) {
         roomId: roomId.toString(),
       });
     }
+  }
+
+  ws.on("message", (raw) => {
+    if (ready) message(raw);
+    else pending.push(raw.toString());
   });
 
   ws.on("close", () => {
     const idx = users.findIndex((x) => x.ws === ws);
     if (idx !== -1) {
+      const leaver = users[idx]!;
       users.splice(idx, 1);
+      leaver.rooms.forEach((roomId) => {
+        broadcast(
+          roomId,
+          { type: "presence_leave", roomId, userId: leaver.userId },
+          except(ws)
+        );
+      });
     }
   });
+
+  // Load the display name in the background, then drain the queue so the real
+  // user name is used even for messages that arrived during the lookup.
+  const drain = () => {
+    ready = true;
+    while (pending.length) message(pending.shift()!);
+  };
+  prismaClient.user
+    .findUnique({ where: { id: userId }, select: { name: true } })
+    .then((record) => {
+      if (record?.name) {
+        user.name = record.name;
+        ws.send(JSON.stringify({ type: "self", userId, name: user.name }));
+      }
+    })
+    .catch((error) => console.error("Failed to load user name:", error))
+    .finally(drain);
 });
 
-function broadcast(roomId: number, data: object) {
+function except(ws: WebSocket): Set<WebSocket> {
+  return new Set([ws]);
+}
+
+function broadcast(roomId: number, data: object, skip?: Set<WebSocket>) {
   const payload = JSON.stringify(data);
   users.forEach((target) => {
-    if (target.rooms.includes(roomId) && target.ws.readyState === WebSocket.OPEN) {
+    if (
+      target.rooms.includes(roomId) &&
+      target.ws.readyState === WebSocket.OPEN &&
+      !skip?.has(target.ws)
+    ) {
       target.ws.send(payload);
     }
   });
