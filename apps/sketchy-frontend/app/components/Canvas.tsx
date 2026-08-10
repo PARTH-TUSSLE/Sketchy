@@ -1,21 +1,26 @@
 "use client";
 
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { IconButton } from "../components/IconButton";
 import {
   ArrowLeft,
+  ArrowUpRight,
   Circle,
   Eraser,
   Frame,
   Hand,
+  Image as ImageIcon,
+  MousePointer2,
   Pencil,
   RectangleHorizontal,
   Trash2,
+  Type,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { Game, COLORS, DEFAULT_COLOR } from "../draw/Game";
+import { Game, COLORS, DEFAULT_COLOR, DEFAULT_FONT_SIZE } from "../draw/Game";
+import { processImageFile } from "../draw/image";
 
 export default function Canvas({
   roomId,
@@ -29,11 +34,30 @@ export default function Canvas({
   const router = useRouter();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const coordsRef = useRef<HTMLSpanElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [selectedTool, setSelectedTool] = useState<Tool>("pencil");
   const [selectedColor, setSelectedColor] = useState<string>(DEFAULT_COLOR);
   const [panMode, setPanMode] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [game, setGame] = useState<Game>();
+
+  // In-place note editing for the text tool.
+  const [textDraft, setTextDraft] = useState<{ x: number; y: number } | null>(null);
+  const [textValue, setTextValue] = useState("");
+
+  const gameRef = useRef<Game | undefined>(undefined);
+  gameRef.current = game;
+  const colorRef = useRef(selectedColor);
+  colorRef.current = selectedColor;
+  const textValueRef = useRef(textValue);
+  textValueRef.current = textValue;
+  const textDraftRef = useRef(textDraft);
+  textDraftRef.current = textDraft;
+  // True right after a commit so the very next canvas click (which is what
+  // triggered that commit) doesn't immediately pop a fresh empty editor open.
+  const suppressTextStartRef = useRef(false);
 
   const goBack = () => {
     const idx = (window.history.state as { idx?: number } | null)?.idx;
@@ -44,15 +68,93 @@ export default function Canvas({
     }
   };
 
+  // Flush the note editor into a shared shape (idempotent: clears the live
+  // draft reference first so blur + click double-fires only ever commit once).
+  const commitTextDraft = useCallback(() => {
+    const draft = textDraftRef.current;
+    if (!draft) return;
+    textDraftRef.current = null;
+    suppressTextStartRef.current = true;
+    const value = textValueRef.current;
+    setTextDraft(null);
+    setTextValue("");
+    if (value.trim().length > 0 && gameRef.current) {
+      gameRef.current.commitText(draft.x, draft.y, value, DEFAULT_FONT_SIZE, colorRef.current);
+    }
+  }, []);
+
+  const resizeTextArea = useCallback(() => {
+    const t = textareaRef.current;
+    if (!t) return;
+    t.style.width = "auto";
+    t.style.width = `${t.scrollWidth + 2}px`;
+    t.style.height = "auto";
+    t.style.height = `${t.scrollHeight + 2}px`;
+  }, []);
+
   const selectTool = (t: Tool) => {
+    commitTextDraft();
+    if (t === "text") suppressTextStartRef.current = false;
     setSelectedTool(t);
     setPanMode(false);
   };
+
+  const pickImage = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !gameRef.current) return;
+    try {
+      const dataUrl = await processImageFile(file);
+      // Drop the image at the centre of the current view, then hand over to
+      // the pointer tool so it can be dragged around or resized immediately.
+      gameRef.current.insertImage(dataUrl);
+      selectTool("select");
+    } catch (err) {
+      console.error("Failed to load image:", err);
+    }
+  };
+
+  const handleStartText = useCallback(
+    (x: number, y: number) => {
+      // A click that just committed the previous note shouldn't instantly
+      // spawn a fresh empty editor at the same cursor position.
+      if (suppressTextStartRef.current) {
+        suppressTextStartRef.current = false;
+        return;
+      }
+      commitTextDraft();
+      setTextDraft({ x, y });
+      setTextValue("");
+    },
+    [commitTextDraft]
+  );
+
+  const handlePreMouseDown = useCallback(() => {
+    commitTextDraft();
+  }, [commitTextDraft]);
+
+  useEffect(() => {
+    if (textDraft) {
+      textareaRef.current?.focus();
+    }
+  }, [textDraft]);
+
+  useEffect(() => {
+    if (textDraft) {
+      requestAnimationFrame(resizeTextArea);
+    }
+  }, [textDraft, textValue, resizeTextArea]);
 
   useEffect(() => {
     if (canvasRef.current) {
       const g = new Game(canvasRef.current, roomId, socket, {
         onViewChange: ({ zoom }) => setZoom(Math.round(zoom * 100)),
+        onStartText: handleStartText,
+        onPreMouseDown: handlePreMouseDown,
       });
       setGame(g);
 
@@ -60,7 +162,7 @@ export default function Canvas({
         g.destroy();
       };
     }
-  }, [roomId, socket]);
+  }, [roomId, socket, handleStartText, handlePreMouseDown]);
 
   useEffect(() => {
     game?.setTool(selectedTool);
@@ -76,11 +178,17 @@ export default function Canvas({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLElement && e.target.tagName === "INPUT") return;
-      if (e.key === "v" || e.key === "P" || e.key === "p") selectTool("pencil");
+      if (e.target instanceof HTMLElement && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+      if (e.key === "v" || e.key === "V") selectTool("select");
+      else if (e.key === "p" || e.key === "P") selectTool("pencil");
       else if (e.key === "r" || e.key === "R") selectTool("rect");
       else if (e.key === "c" || e.key === "C") selectTool("circle");
-      else if (e.key === "e" || e.key === "E") selectTool("eraser");
+      else if (e.key === "a" || e.key === "A") selectTool("arrow");
+      else if (e.key === "t" || e.key === "T") selectTool("text");
+      else if (e.key === "i" || e.key === "I") {
+        selectTool("image");
+        pickImage();
+      } else if (e.key === "e" || e.key === "E") selectTool("eraser");
       else if (e.key === "h" || e.key === "H") setPanMode((m) => !m);
       else if (e.key === "+" || e.key === "=") game?.zoomIn();
       else if (e.key === "-" || e.key === "_") game?.zoomOut();
@@ -101,6 +209,8 @@ export default function Canvas({
       coordsRef.current.textContent = `x ${x} · y ${y}`;
     }
   };
+
+  const textPos = textDraft && game ? game.worldToScreen(textDraft.x, textDraft.y) : null;
 
   return (
     <div className="relative flex h-screen w-screen flex-col overflow-hidden select-none bg-[#141419] text-paper">
@@ -157,6 +267,33 @@ export default function Canvas({
             }}
             className="absolute inset-0 h-full w-full cursor-crosshair rounded-2xl shadow-[0_24px_64px_-24px_rgba(0,0,0,0.8)] ring-1 ring-white/5 touch-none"
           />
+
+          {/* in-place note editor for the text tool */}
+          {textPos && (
+            <textarea
+              ref={textareaRef}
+              value={textValue}
+              placeholder="Type…"
+              onChange={(e) => setTextValue(e.target.value)}
+              onBlur={commitTextDraft}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" || (e.key === "Enter" && (e.metaKey || e.ctrlKey))) {
+                  e.preventDefault();
+                  commitTextDraft();
+                }
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="absolute z-30 max-h-[80vh] min-h-7 min-w-10 resize-none overflow-hidden select-text whitespace-pre rounded-md border border-marker/60 bg-transparent px-1 py-0.5 font-sans outline-none"
+              style={{
+                left: textPos.x,
+                top: textPos.y,
+                fontSize: `${DEFAULT_FONT_SIZE * game!.getZoom()}px`,
+                lineHeight: DEFAULT_FONT_SIZE * game!.getZoom() * 1.3,
+                color: selectedColor,
+                caretColor: selectedColor,
+              }}
+            />
+          )}
         </div>
 
         {/* drafting ruler toolbar */}
@@ -164,6 +301,13 @@ export default function Canvas({
           <span className="anno mr-2 inline-flex items-center gap-1 border-r border-white/10 pr-3 text-paper/40">
             tools
           </span>
+          <IconButton
+            tone="dark"
+            activated={selectedTool === "select"}
+            icon={<MousePointer2 size={18} />}
+            label="Pointer · select (V)"
+            onClick={() => selectTool("select")}
+          />
           <IconButton
             tone="dark"
             activated={selectedTool === "pencil"}
@@ -184,6 +328,30 @@ export default function Canvas({
             icon={<Circle size={18} />}
             label="Circle (C)"
             onClick={() => selectTool("circle")}
+          />
+          <IconButton
+            tone="dark"
+            activated={selectedTool === "arrow"}
+            icon={<ArrowUpRight size={18} />}
+            label="Arrow (A)"
+            onClick={() => selectTool("arrow")}
+          />
+          <IconButton
+            tone="dark"
+            activated={selectedTool === "text"}
+            icon={<Type size={18} />}
+            label="Text (T)"
+            onClick={() => selectTool("text")}
+          />
+          <IconButton
+            tone="dark"
+            activated={selectedTool === "image"}
+            icon={<ImageIcon size={18} />}
+            label="Image (I)"
+            onClick={() => {
+              selectTool("image");
+              pickImage();
+            }}
           />
           <IconButton
             tone="dark"
@@ -232,13 +400,25 @@ export default function Canvas({
         <div className="absolute bottom-6 right-5 hidden sm:block">
           <span className="anno text-paper/35">
             {panMode && "h — hand / pan"}
+            {!panMode && selectedTool === "select" && "v — pointer / select"}
             {!panMode && selectedTool === "pencil" && "p — freehand stroke"}
             {!panMode && selectedTool === "rect" && "r — bounding box"}
             {!panMode && selectedTool === "circle" && "c — circumscribe"}
+            {!panMode && selectedTool === "arrow" && "a — pointer arrow"}
+            {!panMode && selectedTool === "text" && "t — click, then type"}
+            {!panMode && selectedTool === "image" && "i — pick a file to embed"}
             {!panMode && selectedTool === "eraser" && "e — erase a stroke"}
           </span>
           <span className="anno ml-3 text-paper/25">1–9 ink · space pan · ⌃+scroll zoom</span>
         </div>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleFile}
+        />
       </div>
 
       {/* footer — drafting plate along the table */}
@@ -296,4 +476,4 @@ export default function Canvas({
   );
 }
 
-export type Tool = "pencil" | "rect" | "circle" | "eraser";
+export type Tool = "pencil" | "rect" | "circle" | "arrow" | "text" | "image" | "select" | "eraser";

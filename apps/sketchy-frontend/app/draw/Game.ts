@@ -24,6 +24,33 @@ export type Shape =
       type: "pencil";
       points: { x: number; y: number }[];
       color: string;
+    }
+  | {
+      id: string;
+      type: "arrow";
+      startX: number;
+      startY: number;
+      endX: number;
+      endY: number;
+      color: string;
+    }
+  | {
+      id: string;
+      type: "text";
+      x: number;
+      y: number;
+      text: string;
+      fontSize: number;
+      color: string;
+    }
+  | {
+      id: string;
+      type: "image";
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      dataUrl: string;
     };
 
 // Draftsman's ink palette — ordered like Excalidraw's number-key swatches.
@@ -40,6 +67,16 @@ export const COLORS = [
 ] as const;
 
 export const DEFAULT_COLOR = COLORS[0].value;
+export const DEFAULT_FONT_SIZE = 22;
+
+const FONT_FAMILY = "ui-sans-serif, system-ui, sans-serif";
+const TEXT_LINE_HEIGHT = 1.3;
+// Default artboard footprint for an image dropped without a drag gesture.
+const IMAGE_DEFAULT_WIDTH = 200;
+const MIN_SHAPE_DIM = 4;
+const HANDLE_SIZE = 8;
+const HANDLE_HIT = 8;
+const UPDATE_THROTTLE_MS = 60;
 
 // View state for the infinite drafting table: zoom + world-space pan offset.
 export interface ViewState {
@@ -53,6 +90,15 @@ interface RemoteCursor {
   x: number | null;
   y: number | null;
 }
+
+interface Bounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+type HandleKey = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
@@ -93,13 +139,34 @@ export class Game {
   // Eraser: id of the shape currently under the cursor, if any.
   private hoveredShapeId: string | null = null;
 
+  // Selection for pointer mode: which shape is grabbed + what drag is happening.
+  private selectedShapeId: string | null = null;
+  private moveDrag: { shape: Shape; start: { x: number; y: number } } | null = null;
+  private resizeDrag: {
+    shape: Shape;
+    origBounds: Bounds;
+    handle: HandleKey;
+  } | null = null;
+  private bandSelect: { start: { x: number; y: number } } | null = null;
+  private bandCurrent: { x: number; y: number } | null = null;
+  private lastUpdateSent = 0;
+  private imagePlacementCount = 0;
+
+  private imageCache = new Map<string, HTMLImageElement>();
+
   private onViewChange: ((view: ViewState) => void) | null;
+  private onStartText: ((x: number, y: number) => void) | null;
+  private onPreMouseDown: (() => void) | null;
 
   constructor(
     canvas: HTMLCanvasElement,
     roomId: string,
     socket: WebSocket,
-    opts: { onViewChange?: (view: ViewState) => void } = {}
+    opts: {
+      onViewChange?: (view: ViewState) => void;
+      onStartText?: (x: number, y: number) => void;
+      onPreMouseDown?: () => void;
+    } = {}
   ) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d")!;
@@ -108,6 +175,8 @@ export class Game {
     this.socket = socket;
     this.clicked = false;
     this.onViewChange = opts.onViewChange ?? null;
+    this.onStartText = opts.onStartText ?? null;
+    this.onPreMouseDown = opts.onPreMouseDown ?? null;
     this.configureCanvas();
     this.initHandlers();
     this.initMouseHandlers();
@@ -136,6 +205,75 @@ export class Game {
 
   getZoom() {
     return this.zoom;
+  }
+
+  // Map a world-space point to its pixel position inside the canvas element.
+  worldToScreen(worldX: number, worldY: number) {
+    return {
+      x: (worldX - this.offsetX) * this.zoom,
+      y: (worldY - this.offsetY) * this.zoom,
+    };
+  }
+
+  // Image tool: drop a freshly picked file onto the centre of the current
+  // view at a comfortable on-screen size, ready to move or resize.
+  insertImage(dataUrl: string) {
+    const width = IMAGE_DEFAULT_WIDTH / this.zoom;
+    const cw = this.canvas.clientWidth || 1;
+    const ch = this.canvas.clientHeight || 1;
+    // Cascade successive drops so fresh imports never stack exactly on top of
+    // the previous one.
+    const nudge = (this.imagePlacementCount * 18) / this.zoom;
+    this.imagePlacementCount = (this.imagePlacementCount + 1) % 12;
+    const cx = this.offsetX + cw / 2 / this.zoom + nudge;
+    const cy = this.offsetY + ch / 2 / this.zoom + nudge;
+
+    const place = (img: HTMLImageElement) => {
+      const ar = img.naturalWidth / Math.max(1, img.naturalHeight);
+      const height = width / ar;
+      const shape: Shape = {
+        id: newShapeId(),
+        type: "image",
+        x: cx - width / 2,
+        y: cy - height / 2,
+        width,
+        height,
+        dataUrl,
+      };
+      this.existingShapes.push(shape);
+      this.selectedShapeId = shape.id;
+      this.clearCanvas();
+      this.socket.send(
+        JSON.stringify({ type: "shape", shape, roomId: this.roomId })
+      );
+    };
+
+    const cached = this.imageCache.get(dataUrl);
+    if (cached && cached.naturalWidth > 0) {
+      place(cached);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => place(img);
+    img.onerror = () => console.error("Failed to decode image");
+    img.src = dataUrl;
+    this.imageCache.set(dataUrl, img);
+  }
+
+  // Text tool: commit a finished editor buffer as a text shape.
+  commitText(x: number, y: number, text: string, fontSize: number, color: string) {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    const shape: Shape = {
+      id: newShapeId(),
+      type: "text",
+      x,
+      y,
+      text,
+      fontSize,
+      color,
+    };
+    this.addShape(shape);
   }
 
   zoomIn() {
@@ -266,10 +404,15 @@ export class Game {
     this.socket.onmessage = (event) => {
       const message = JSON.parse(event.data);
       if (message.type === "shape" && message.shape) {
-        this.existingShapes.push(message.shape);
+        this.upsertShape(message.shape);
+        this.clearCanvas();
+      } else if (message.type === "update" && message.shape) {
+        // A room-mate dragged a shape; refresh it in place by id.
+        this.upsertShape(message.shape);
         this.clearCanvas();
       } else if (message.type === "clear") {
         this.existingShapes = [];
+        this.selectedShapeId = null;
         this.clearCanvas();
       } else if (message.type === "erase" && message.shapeId) {
         this.existingShapes = this.existingShapes.filter(
@@ -277,6 +420,9 @@ export class Game {
         );
         if (this.hoveredShapeId === message.shapeId) {
           this.hoveredShapeId = null;
+        }
+        if (this.selectedShapeId === message.shapeId) {
+          this.selectedShapeId = null;
         }
         this.clearCanvas();
       } else if (message.type === "pointer") {
@@ -298,6 +444,17 @@ export class Game {
         this.clearCanvas();
       }
     };
+  }
+
+  // Add when unseen, replace when known — so server echoes, room updates and
+  // local commits never fabricate a second copy of the same shape.
+  private upsertShape(shape: Shape) {
+    const idx = this.existingShapes.findIndex((s) => s.id === shape.id);
+    if (idx >= 0) {
+      this.existingShapes[idx] = shape;
+    } else {
+      this.existingShapes.push(shape);
+    }
   }
 
   // Merge instead of overwrite so a roster refresh never blanks a cursor we
@@ -328,9 +485,17 @@ export class Game {
 
   clearBoard() {
     this.existingShapes = [];
+    this.selectedShapeId = null;
     this.clearCanvas();
     this.socket.send(
       JSON.stringify({ type: "clear", roomId: this.roomId })
+    );
+  }
+
+  private addShape(shape: Shape) {
+    this.existingShapes.push(shape);
+    this.socket.send(
+      JSON.stringify({ type: "shape", shape, roomId: this.roomId })
     );
   }
 
@@ -343,6 +508,7 @@ export class Game {
     // Uncover whatever line was underneath so the cursor can keep erasing.
     const next = this.shapeAt(wx, wy);
     this.hoveredShapeId = next?.id ?? null;
+    if (this.selectedShapeId === target.id) this.selectedShapeId = null;
     this.clearCanvas();
     this.socket.send(
       JSON.stringify({
@@ -378,6 +544,35 @@ export class Game {
       const dy = wy - s.centerY;
       return dx * dx + dy * dy <= (s.radius + m) * (s.radius + m);
     }
+    if (s.type === "image") {
+      const minX = Math.min(s.x, s.x + s.width) - m;
+      const maxX = Math.max(s.x, s.x + s.width) + m;
+      const minY = Math.min(s.y, s.y + s.height) - m;
+      const maxY = Math.max(s.y, s.y + s.height) + m;
+      return wx >= minX && wx <= maxX && wy >= minY && wy <= maxY;
+    }
+    if (s.type === "text") {
+      const size = this.textSize(s.text, s.fontSize);
+      return (
+        wx >= s.x - m &&
+        wx <= s.x + size.width + m &&
+        wy >= s.y - m &&
+        wy <= s.y + size.height + m
+      );
+    }
+    if (s.type === "arrow") {
+      const a = { x: s.startX, y: s.startY };
+      const b = { x: s.endX, y: s.endY };
+      const head = this.arrowHead(b, a);
+      if (
+        distToSegment(a, b, wx, wy) <= m ||
+        distToSegment(b, head.a, wx, wy) <= m ||
+        distToSegment(b, head.b, wx, wy) <= m
+      ) {
+        return true;
+      }
+      return false;
+    }
     const pts = s.points;
     if (pts.length === 1) return Math.hypot(wx - pts[0]!.x, wy - pts[0]!.y) <= m;
     for (let i = 0; i < pts.length - 1; i++) {
@@ -412,6 +607,11 @@ export class Game {
 
     // In eraser mode, flag the line under the cursor before it is erased.
     this.drawHoveredShape();
+    // In pointer mode, frame the picked shape with resize handles.
+    this.drawSelection();
+
+    // Pointer-mode rubber band while box-selecting.
+    this.drawBand();
 
     // Presence cursors live in screen space on top of the paper.
     this.drawRemoteCursors();
@@ -518,7 +718,7 @@ export class Game {
   }
 
   private drawShape(shape: Shape) {
-    this.ctx.strokeStyle = shape.color || DEFAULT_COLOR;
+    this.ctx.strokeStyle = "color" in shape ? shape.color : DEFAULT_COLOR;
     this.ctx.lineWidth = 2 / this.zoom;
     this.ctx.lineCap = "round";
     this.ctx.lineJoin = "round";
@@ -540,7 +740,97 @@ export class Game {
       }
       this.ctx.stroke();
       this.ctx.closePath();
+    } else if (shape.type === "arrow") {
+      this.drawArrow(
+        { x: shape.startX, y: shape.startY },
+        { x: shape.endX, y: shape.endY }
+      );
+    } else if (shape.type === "text") {
+      this.ctx.fillStyle = shape.color || DEFAULT_COLOR;
+      this.drawText(shape.text, shape.x, shape.y, shape.fontSize);
+    } else if (shape.type === "image") {
+      const img = this.imageFor(shape.dataUrl);
+      if (img && img.naturalWidth > 0) {
+        try {
+          this.ctx.drawImage(img, shape.x, shape.y, shape.width, shape.height);
+        } catch {
+          // Data URL failed to decode; skip quietly.
+        }
+      }
     }
+  }
+
+  // Two feathered back-edges that make the arrowhead at the tip.
+  private arrowHead(end: { x: number; y: number }, start: { x: number; y: number }) {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const len = Math.hypot(dx, dy);
+    const ux = len < 1e-6 ? 1 : dx / len;
+    const uy = len < 1e-6 ? 0 : dy / len;
+    const headLen = 14;
+    const spread = 0.42;
+    const ca = Math.cos(spread);
+    const sa = Math.sin(spread);
+    // Feathers are the shaft vector rotated ±spread around the tip, so they
+    // always flare symmetrically back along the arrow's own direction.
+    const a = {
+      x: end.x - (ux * ca - uy * sa) * headLen,
+      y: end.y - (ux * sa + uy * ca) * headLen,
+    };
+    const b = {
+      x: end.x - (ux * ca + uy * sa) * headLen,
+      y: end.y + (ux * sa - uy * ca) * headLen,
+    };
+    return { a, b };
+  }
+
+  // Shaft plus a solid, filled arrowhead at the tip.
+  private drawArrow(start: { x: number; y: number }, end: { x: number; y: number }) {
+    this.ctx.beginPath();
+    this.ctx.moveTo(start.x, start.y);
+    this.ctx.lineTo(end.x, end.y);
+    this.ctx.stroke();
+    const head = this.arrowHead(end, start);
+    this.ctx.fillStyle = this.ctx.strokeStyle;
+    this.ctx.beginPath();
+    this.ctx.moveTo(end.x, end.y);
+    this.ctx.lineTo(head.a.x, head.a.y);
+    this.ctx.lineTo(head.b.x, head.b.y);
+    this.ctx.closePath();
+    this.ctx.fill();
+  }
+
+  private drawText(text: string, x: number, y: number, fontSize: number) {
+    this.ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+    this.ctx.textBaseline = "top";
+    this.ctx.textAlign = "left";
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      this.ctx.fillText(lines[i]!, x, y + i * fontSize * TEXT_LINE_HEIGHT);
+    }
+  }
+
+  private textSize(text: string, fontSize: number): { width: number; height: number } {
+    this.ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+    let width = 0;
+    const lines = text.split("\n");
+    for (const line of lines) {
+      width = Math.max(width, this.ctx.measureText(line).width);
+    }
+    return { width, height: lines.length * fontSize * TEXT_LINE_HEIGHT };
+  }
+
+  private imageFor(dataUrl: string): HTMLImageElement | undefined {
+    const cached = this.imageCache.get(dataUrl);
+    if (cached) return cached;
+    const img = new Image();
+    img.onload = () => {
+      // Re-render once the bitmap is actually decodable.
+      this.clearCanvas();
+    };
+    img.src = dataUrl;
+    this.imageCache.set(dataUrl, img);
+    return img;
   }
 
   private drawHoveredShape() {
@@ -570,13 +860,36 @@ export class Game {
         this.ctx.stroke();
         this.ctx.closePath();
       }
+    } else if (s.type === "arrow") {
+      const start = { x: s.startX, y: s.startY };
+      const end = { x: s.endX, y: s.endY };
+      this.ctx.beginPath();
+      this.ctx.moveTo(start.x, start.y);
+      this.ctx.lineTo(end.x, end.y);
+      this.ctx.lineTo(this.arrowHead(end, start).a.x, this.arrowHead(end, start).a.y);
+      this.ctx.moveTo(end.x, end.y);
+      this.ctx.lineTo(this.arrowHead(end, start).b.x, this.arrowHead(end, start).b.y);
+      this.ctx.stroke();
+      this.ctx.closePath();
+    } else if (s.type === "text") {
+      const size = this.textSize(s.text, s.fontSize);
+      this.ctx.fillRect(s.x, s.y, size.width, size.height);
+      this.ctx.strokeRect(s.x, s.y, size.width, size.height);
+    } else if (s.type === "image") {
+      this.ctx.fillRect(s.x, s.y, s.width, s.height);
+      this.ctx.strokeRect(s.x, s.y, s.width, s.height);
     }
     this.ctx.restore();
   }
 
-  private shapeBounds(s: Shape) {
-    if (s.type === "rect") {
-      return { minX: s.x, minY: s.y, maxX: s.x + s.width, maxY: s.y + s.height };
+  private shapeBounds(s: Shape): Bounds {
+    if (s.type === "rect" || s.type === "image") {
+      return {
+        minX: Math.min(s.x, s.x + s.width),
+        minY: Math.min(s.y, s.y + s.height),
+        maxX: Math.max(s.x, s.x + s.width),
+        maxY: Math.max(s.y, s.y + s.height),
+      };
     }
     if (s.type === "circle") {
       return {
@@ -585,6 +898,18 @@ export class Game {
         maxX: s.centerX + s.radius,
         maxY: s.centerY + s.radius,
       };
+    }
+    if (s.type === "arrow") {
+      return {
+        minX: Math.min(s.startX, s.endX),
+        minY: Math.min(s.startY, s.endY),
+        maxX: Math.max(s.startX, s.endX),
+        maxY: Math.max(s.startY, s.endY),
+      };
+    }
+    if (s.type === "text") {
+      const size = this.textSize(s.text, s.fontSize);
+      return { minX: s.x, minY: s.y, maxX: s.x + size.width, maxY: s.y + size.height };
     }
     let minX = Infinity;
     let minY = Infinity;
@@ -600,9 +925,240 @@ export class Game {
     return { minX, minY, maxX, maxY };
   }
 
+  // ---- Pointer mode: selection, move and resize ----
+
+  private getSelectedShape(): Shape | null {
+    if (!this.selectedShapeId) return null;
+    return this.existingShapes.find((s) => s.id === this.selectedShapeId) ?? null;
+  }
+
+  private startSelectDrag(p: { x: number; y: number }) {
+    const hit = this.shapeAt(p.x, p.y);
+    if (hit) {
+      if (this.selectedShapeId === hit.id) {
+        const handle = this.hitHandle(hit.id, p.x, p.y);
+        if (handle) {
+          this.resizeDrag = {
+            shape: hit,
+            origBounds: this.shapeBounds(hit),
+            handle,
+          };
+          this.clicked = true;
+          this.clearCanvas();
+          return;
+        }
+      }
+      this.selectedShapeId = hit.id;
+      this.moveDrag = { shape: hit, start: { x: p.x, y: p.y } };
+      this.clicked = true;
+    } else {
+      this.selectedShapeId = null;
+      this.bandSelect = { start: { x: p.x, y: p.y } };
+      this.bandCurrent = { x: p.x, y: p.y };
+      this.clicked = true;
+    }
+    this.clearCanvas();
+  }
+
+  private handlePositions(b: Bounds): { key: HandleKey; x: number; y: number }[] {
+    const cx = (b.minX + b.maxX) / 2;
+    const cy = (b.minY + b.maxY) / 2;
+    return [
+      { key: "nw", x: b.minX, y: b.minY },
+      { key: "n", x: cx, y: b.minY },
+      { key: "ne", x: b.maxX, y: b.minY },
+      { key: "e", x: b.maxX, y: cy },
+      { key: "se", x: b.maxX, y: b.maxY },
+      { key: "s", x: cx, y: b.maxY },
+      { key: "sw", x: b.minX, y: b.maxY },
+      { key: "w", x: b.minX, y: cy },
+    ];
+  }
+
+  private hitHandle(id: string, wx: number, wy: number): HandleKey | null {
+    const s = this.existingShapes.find((x) => x.id === id);
+    if (!s) return null;
+    const r = HANDLE_HIT / this.zoom;
+    for (const pos of this.handlePositions(this.shapeBounds(s))) {
+      if (Math.hypot(pos.x - wx, pos.y - wy) <= r) return pos.key;
+    }
+    return null;
+  }
+
+  private drawSelection() {
+    const s = this.getSelectedShape();
+    if (!s) return;
+    const b = this.shapeBounds(s);
+    const handle = this.handlePositions(b);
+    this.ctx.save();
+    this.ctx.setLineDash([6 / this.zoom, 4 / this.zoom]);
+    this.ctx.strokeStyle = "#2f6bff";
+    this.ctx.lineWidth = 1.5 / this.zoom;
+    this.ctx.strokeRect(b.minX, b.minY, b.maxX - b.minX, b.maxY - b.minY);
+    this.ctx.restore();
+
+    const size = HANDLE_SIZE / this.zoom;
+    for (const pos of handle) {
+      this.ctx.save();
+      this.ctx.fillStyle = "#ffffff";
+      this.ctx.strokeStyle = "#2f6bff";
+      this.ctx.lineWidth = 1.5 / this.zoom;
+      this.ctx.fillRect(pos.x - size / 2, pos.y - size / 2, size, size);
+      this.ctx.strokeRect(pos.x - size / 2, pos.y - size / 2, size, size);
+      this.ctx.restore();
+    }
+  }
+
+  private computeResizeBounds(
+    orig: Bounds,
+    handle: HandleKey,
+    mx: number,
+    my: number,
+    lockAspect: boolean
+  ): Bounds {
+    const dMinX = handle.includes("w");
+    const dMaxX = handle.includes("e");
+    const dMinY = handle.includes("n");
+    const dMaxY = handle.includes("s");
+    let minX = orig.minX;
+    let maxX = orig.maxX;
+    let minY = orig.minY;
+    let maxY = orig.maxY;
+    if (dMinX) minX = mx;
+    if (dMaxX) maxX = mx;
+    if (dMinY) minY = my;
+    if (dMaxY) maxY = my;
+    if (maxX - minX < MIN_SHAPE_DIM) {
+      if (dMinX) minX = maxX - MIN_SHAPE_DIM;
+      else maxX = minX + MIN_SHAPE_DIM;
+    }
+    if (maxY - minY < MIN_SHAPE_DIM) {
+      if (dMinY) minY = maxY - MIN_SHAPE_DIM;
+      else maxY = minY + MIN_SHAPE_DIM;
+    }
+    if (lockAspect) {
+      const ow = orig.maxX - orig.minX || 1;
+      const oh = orig.maxY - orig.minY || 1;
+      const sW = (maxX - minX) / ow;
+      const sH = (maxY - minY) / oh;
+      const isCorner = (dMinX || dMaxX) && (dMinY || dMaxY);
+      const s = isCorner ? Math.max(sW, sH) : dMinX || dMaxX ? sW : sH;
+      const newW = ow * s;
+      const newH = oh * s;
+      if (dMinX) minX = orig.maxX - newW;
+      else minX = orig.minX;
+      if (dMaxX) maxX = orig.minX + newW;
+      else maxX = orig.maxX;
+      if (dMinY) minY = orig.maxY - newH;
+      else minY = orig.minY;
+      if (dMaxY) maxY = orig.minY + newH;
+      else maxY = orig.maxY;
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  private applyBoundsToShape(s: Shape, b: Bounds, orig: Bounds) {
+    if (s.type === "rect" || s.type === "image") {
+      s.x = b.minX;
+      s.y = b.minY;
+      s.width = b.maxX - b.minX;
+      s.height = b.maxY - b.minY;
+    } else if (s.type === "circle") {
+      const scale = (b.maxX - b.minX) / (orig.maxX - orig.minX || 1);
+      s.radius = Math.max(MIN_SHAPE_DIM / 2, s.radius * scale);
+      s.centerX = (b.minX + b.maxX) / 2;
+      s.centerY = (b.minY + b.maxY) / 2;
+    } else if (s.type === "arrow") {
+      const ow = orig.maxX - orig.minX || 1;
+      const oh = orig.maxY - orig.minY || 1;
+      const nw = b.maxX - b.minX;
+      const nh = b.maxY - b.minY;
+      s.startX = b.minX + ((s.startX - orig.minX) / ow) * nw;
+      s.startY = b.minY + ((s.startY - orig.minY) / oh) * nh;
+      s.endX = b.minX + ((s.endX - orig.minX) / ow) * nw;
+      s.endY = b.minY + ((s.endY - orig.minY) / oh) * nh;
+    } else if (s.type === "text") {
+      const scale = (b.maxX - b.minX) / (orig.maxX - orig.minX || 1);
+      s.fontSize = Math.max(8, Math.round(s.fontSize * scale));
+      s.x = b.minX;
+      s.y = b.minY;
+    }
+  }
+
+  private moveShapeBy(s: Shape, dx: number, dy: number) {
+    if (s.type === "rect" || s.type === "text" || s.type === "image") {
+      s.x += dx;
+      s.y += dy;
+    } else if (s.type === "circle") {
+      s.centerX += dx;
+      s.centerY += dy;
+    } else if (s.type === "arrow") {
+      s.startX += dx;
+      s.startY += dy;
+      s.endX += dx;
+      s.endY += dy;
+    }
+  }
+
+  private bandBox(): Bounds {
+    const a = this.bandSelect!;
+    return {
+      minX: Math.min(a.start.x, this.bandCurrent!.x),
+      minY: Math.min(a.start.y, this.bandCurrent!.y),
+      maxX: Math.max(a.start.x, this.bandCurrent!.x),
+      maxY: Math.max(a.start.y, this.bandCurrent!.y),
+    };
+  }
+
+  private drawBand() {
+    if (!this.bandSelect || !this.bandCurrent) return;
+    const b = this.bandBox();
+    this.ctx.save();
+    this.ctx.fillStyle = "rgba(47, 107, 255, 0.08)";
+    this.ctx.strokeStyle = "#2f6bff";
+    this.ctx.lineWidth = 1.5 / this.zoom;
+    this.ctx.setLineDash([5 / this.zoom, 3 / this.zoom]);
+    this.ctx.fillRect(b.minX, b.minY, b.maxX - b.minX, b.maxY - b.minY);
+    this.ctx.strokeRect(b.minX, b.minY, b.maxX - b.minX, b.maxY - b.minY);
+    this.ctx.restore();
+  }
+
+  private applyBandSelect() {
+    const box = this.bandBox();
+    for (let i = this.existingShapes.length - 1; i >= 0; i--) {
+      const s = this.existingShapes[i]!;
+      const sb = this.shapeBounds(s);
+      if (
+        sb.minX >= box.minX &&
+        sb.maxX <= box.maxX &&
+        sb.minY >= box.minY &&
+        sb.maxY <= box.maxY
+      ) {
+        this.selectedShapeId = s.id;
+        return;
+      }
+    }
+    this.selectedShapeId = null;
+  }
+
+  private sendShapeUpdate(shape: Shape) {
+    this.socket.send(
+      JSON.stringify({ type: "update", shape, roomId: this.roomId })
+    );
+  }
+
+  private broadcastUpdate(shape: Shape) {
+    const now = Date.now();
+    if (now - this.lastUpdateSent < UPDATE_THROTTLE_MS) return;
+    this.lastUpdateSent = now;
+    this.sendShapeUpdate(shape);
+  }
+
   private updateCursor() {
     if (this.panning) this.canvas.style.cursor = "grabbing";
     else if (this.panTool || this.spaceDown) this.canvas.style.cursor = "grab";
+    else if (this.selectedTool === "select" && this.resizeDrag) this.canvas.style.cursor = "nwse-resize";
+    else if (this.selectedTool === "select") this.canvas.style.cursor = "default";
     else this.canvas.style.cursor = "";
   }
 
@@ -625,6 +1181,30 @@ export class Game {
     this.clicked = false;
 
     const { x, y } = this.mapToCanvas(e.clientX, e.clientY);
+
+    if (this.selectedTool === "select") {
+      if (this.resizeDrag) {
+        this.sendShapeUpdate(this.resizeDrag.shape);
+        this.resizeDrag = null;
+        this.updateCursor();
+        this.clearCanvas();
+      } else if (this.moveDrag) {
+        this.sendShapeUpdate(this.moveDrag.shape);
+        this.moveDrag = null;
+        this.clearCanvas();
+      } else if (this.bandSelect) {
+        this.applyBandSelect();
+        this.bandSelect = null;
+        this.bandCurrent = null;
+        this.clearCanvas();
+      }
+      return;
+    }
+
+    if (this.selectedTool === "text") {
+      return;
+    }
+
     const width = x - this.startX;
     const height = y - this.startY;
 
@@ -661,6 +1241,16 @@ export class Game {
         color: this.strokeColor,
       };
       this.points = [];
+    } else if (selectedTool === "arrow") {
+      shape = {
+        id,
+        type: "arrow",
+        startX: this.startX,
+        startY: this.startY,
+        endX: x,
+        endY: y,
+        color: this.strokeColor,
+      };
     }
 
     if (!shape) {
@@ -692,18 +1282,29 @@ export class Game {
       return;
     }
 
-    this.clicked = true;
-    const p = this.mapToCanvas(e.clientX, e.clientY);
-    this.startX = p.x;
-    this.startY = p.y;
-    this.points = [{ x: p.x, y: p.y }];
+    this.onPreMouseDown?.();
 
-    // The eraser is a click tool: lift whatever line is under the cursor.
+    const p = this.mapToCanvas(e.clientX, e.clientY);
+
+    if (this.selectedTool === "select") {
+      this.startSelectDrag(p);
+      return;
+    }
+
+    if (this.selectedTool === "text") {
+      this.onStartText?.(p.x, p.y);
+      return;
+    }
+
     if (this.selectedTool === "eraser") {
-      this.clicked = false;
       this.eraseShapeAt(p.x, p.y);
       return;
     }
+
+    this.clicked = true;
+    this.startX = p.x;
+    this.startY = p.y;
+    this.points = [{ x: p.x, y: p.y }];
   };
 
   mouseMoveHandler = (e: MouseEvent) => {
@@ -713,6 +1314,36 @@ export class Game {
       this.panBy(e.clientX - this.panLastX, e.clientY - this.panLastY);
       this.panLastX = e.clientX;
       this.panLastY = e.clientY;
+      return;
+    }
+    if (this.selectedTool === "select") {
+      if (!this.clicked) return;
+      if (this.resizeDrag) {
+        const lock = this.resizeDrag.shape.type === "image" || e.shiftKey;
+        const b = this.computeResizeBounds(
+          this.resizeDrag.origBounds,
+          this.resizeDrag.handle,
+          p.x,
+          p.y,
+          lock
+        );
+        this.applyBoundsToShape(this.resizeDrag.shape, b, this.resizeDrag.origBounds);
+        this.updateCursor();
+        this.clearCanvas();
+        this.broadcastUpdate(this.resizeDrag.shape);
+        return;
+      }
+      if (this.moveDrag) {
+        this.moveShapeBy(this.moveDrag.shape, p.x - this.moveDrag.start.x, p.y - this.moveDrag.start.y);
+        this.moveDrag.start = { x: p.x, y: p.y };
+        this.clearCanvas();
+        this.broadcastUpdate(this.moveDrag.shape);
+        return;
+      }
+      if (this.bandSelect) {
+        this.bandCurrent = { x: p.x, y: p.y };
+        this.clearCanvas();
+      }
       return;
     }
     if (!this.clicked) {
@@ -747,6 +1378,11 @@ export class Game {
       }
       this.ctx.stroke();
       this.ctx.closePath();
+    } else if (selectedTool === "arrow") {
+      this.drawArrow(
+        { x: this.startX, y: this.startY },
+        { x: p.x, y: p.y }
+      );
     }
   };
 
@@ -764,10 +1400,13 @@ export class Game {
   };
 
   spaceDownHandler = (e: KeyboardEvent) => {
-    if (e.target instanceof HTMLElement && e.target.tagName === "INPUT") return;
+    if (e.target instanceof HTMLElement && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
     if (e.code === "Space" && !e.repeat) {
       this.spaceDown = true;
       this.updateCursor();
+    } else if (e.key === "Escape" && !e.repeat && this.selectedShapeId) {
+      this.selectedShapeId = null;
+      this.clearCanvas();
     }
   };
 
