@@ -211,6 +211,19 @@ wss.on("connection", function connection(ws, request) {
         return;
       }
 
+      // Tell the room before touching the database so a slow write can never
+      // delay what everyone sees, and don't echo back to the artist — their
+      // canvas already painted the shape locally.
+      broadcast(
+        roomId,
+        {
+          type: "shape",
+          shape: payload,
+          roomId: roomId.toString(),
+        },
+        except(ws)
+      );
+
       try {
         await prismaClient.shape.create({
           data: {
@@ -221,14 +234,7 @@ wss.on("connection", function connection(ws, request) {
         });
       } catch (error) {
         console.error("Failed to persist shape:", error);
-        return;
       }
-
-      broadcast(roomId, {
-        type: "shape",
-        shape: payload,
-        roomId: roomId.toString(),
-      });
     }
 
     if (type === "update") {
@@ -238,6 +244,20 @@ wss.on("connection", function connection(ws, request) {
       if (roomId === null || !shape || typeof shapeId !== "string" || typeof shapeType !== "string") {
         return;
       }
+
+      // Broadcast first and skip the sender. Persisting every throttled drag
+      // snapshot can take tens of milliseconds, and if the echo to the artist
+      // were gated on that write, out-of-order stale snapshots would land after
+      // their drag finished and snap the shape back to an older spot.
+      broadcast(
+        roomId,
+        {
+          type: "update",
+          shape,
+          roomId: roomId.toString(),
+        },
+        except(ws)
+      );
 
       try {
         // Shapes are keyed by the client uuid stored inside payload.id;
@@ -256,14 +276,7 @@ wss.on("connection", function connection(ws, request) {
         });
       } catch (error) {
         console.error("Failed to update shape:", error);
-        return;
       }
-
-      broadcast(roomId, {
-        type: "update",
-        shape,
-        roomId: roomId.toString(),
-      });
       return;
     }
 
@@ -272,6 +285,12 @@ wss.on("connection", function connection(ws, request) {
       if (roomId === null || typeof shapeId !== "string" || shapeId.length === 0) {
         return;
       }
+
+      broadcast(
+        roomId,
+        { type: "erase", shapeId, roomId: roomId.toString() },
+        except(ws)
+      );
 
       try {
         // New strokes are keyed by the client uuid stored inside payload.id;
@@ -289,14 +308,7 @@ wss.on("connection", function connection(ws, request) {
         });
       } catch (error) {
         console.error("Failed to erase shape:", error);
-        return;
       }
-
-      broadcast(roomId, {
-        type: "erase",
-        shapeId,
-        roomId: roomId.toString(),
-      });
       return;
     }
 
@@ -305,19 +317,19 @@ wss.on("connection", function connection(ws, request) {
         return;
       }
 
+      broadcast(
+        roomId,
+        { type: "clear", roomId: roomId.toString() },
+        except(ws)
+      );
+
       try {
         await prismaClient.shape.deleteMany({
           where: { roomId },
         });
       } catch (error) {
         console.error("Failed to clear shapes:", error);
-        return;
       }
-
-      broadcast(roomId, {
-        type: "clear",
-        roomId: roomId.toString(),
-      });
     }
   }
 
