@@ -19,8 +19,16 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { Game, COLORS, DEFAULT_COLOR, DEFAULT_FONT_SIZE } from "../draw/Game";
+import { Game, COLORS, DEFAULT_COLOR, DEFAULT_FONT_SIZE, type Shape } from "../draw/Game";
 import { processImageFile } from "../draw/image";
+
+// The note editor is a floating card on the paper: inner padding + hairline
+// border around the live text. These mirror the Tailwind classes used below so
+// the box can be nudged left/up by exactly the chrome width, keeping the text
+// you type anchored to the exact world point where you clicked.
+const TEXT_BOX_PAD_X = 14;
+const TEXT_BOX_PAD_Y = 10;
+const TEXT_BOX_BORDER = 1;
 
 export default function Canvas({
   roomId,
@@ -55,6 +63,9 @@ export default function Canvas({
   textValueRef.current = textValue;
   const textDraftRef = useRef(textDraft);
   textDraftRef.current = textDraft;
+  // When the editor is rewriting an existing note, its shape id lives here so
+  // the commit updates that shape instead of stacking a second copy.
+  const editingTextIdRef = useRef<string | null>(null);
   // True right after a commit so the very next canvas click (which is what
   // triggered that commit) doesn't immediately pop a fresh empty editor open.
   const suppressTextStartRef = useRef(false);
@@ -70,26 +81,47 @@ export default function Canvas({
 
   // Flush the note editor into a shared shape (idempotent: clears the live
   // draft reference first so blur + click double-fires only ever commit once).
+  // Returns true when an open draft was actually committed, so callers that
+  // need to know (e.g. a canvas click that just finished a note) can react.
   const commitTextDraft = useCallback(() => {
     const draft = textDraftRef.current;
-    if (!draft) return;
+    if (!draft) return false;
     textDraftRef.current = null;
-    suppressTextStartRef.current = true;
     const value = textValueRef.current;
+    const editId = editingTextIdRef.current;
+    editingTextIdRef.current = null;
     setTextDraft(null);
     setTextValue("");
     if (value.trim().length > 0 && gameRef.current) {
-      gameRef.current.commitText(draft.x, draft.y, value, DEFAULT_FONT_SIZE, colorRef.current);
+      if (editId) {
+        gameRef.current.commitTextEdit(
+          editId,
+          draft.x,
+          draft.y,
+          value,
+          DEFAULT_FONT_SIZE,
+          colorRef.current
+        );
+      } else {
+        gameRef.current.commitText(draft.x, draft.y, value, DEFAULT_FONT_SIZE, colorRef.current);
+      }
     }
+    return true;
   }, []);
 
+  // Grow the card to fit the note (both directions), never smaller than a
+  // comfortable empty slot. scrollWidth/scrollHeight include the padding, so
+  // only the hairline border needs adding on top of each dimension.
   const resizeTextArea = useCallback(() => {
     const t = textareaRef.current;
     if (!t) return;
-    t.style.width = "auto";
-    t.style.width = `${t.scrollWidth + 2}px`;
-    t.style.height = "auto";
-    t.style.height = `${t.scrollHeight + 2}px`;
+    const chrome = 2 * TEXT_BOX_BORDER;
+    t.style.width = "0px";
+    const w = t.scrollWidth;
+    t.style.width = `${Math.ceil(w) + chrome}px`;
+    t.style.height = "0px";
+    const h = t.scrollHeight;
+    t.style.height = `${Math.ceil(h) + chrome}px`;
   }, []);
 
   const selectTool = (t: Tool) => {
@@ -127,19 +159,45 @@ export default function Canvas({
         return;
       }
       commitTextDraft();
+      editingTextIdRef.current = null;
       setTextDraft({ x, y });
       setTextValue("");
     },
     [commitTextDraft]
   );
 
-  const handlePreMouseDown = useCallback(() => {
+  // The text tool clicked an existing note: re-open it in place, pre-filled,
+  // and pick up its ink colour so what you see matches what you're editing.
+  const handleEditText = useCallback((shape: Shape) => {
+    if (shape.type !== "text") return;
     commitTextDraft();
+    editingTextIdRef.current = shape.id;
+    setSelectedColor(shape.color);
+    setTextDraft({ x: shape.x, y: shape.y });
+    setTextValue(shape.text);
+  }, [commitTextDraft]);
+
+  // Committed via a canvas click (mousedown on the paper). Only the click that
+  // placed the note should be suppressed so it doesn't pop a fresh editor open;
+  // Escape/Enter/blur commits must not leave a stale suppression behind.
+  const handlePreMouseDown = useCallback(() => {
+    if (commitTextDraft()) {
+      suppressTextStartRef.current = true;
+      return true;
+    }
+    return false;
   }, [commitTextDraft]);
 
   useEffect(() => {
     if (textDraft) {
-      textareaRef.current?.focus();
+      const t = textareaRef.current;
+      if (t) {
+        t.focus();
+        // Place the caret at the end (Excalidraw-style) so typing appends
+        // to an existing note instead of inserting at the start.
+        const end = t.value.length;
+        t.setSelectionRange(end, end);
+      }
     }
   }, [textDraft]);
 
@@ -154,6 +212,7 @@ export default function Canvas({
       const g = new Game(canvasRef.current, roomId, socket, {
         onViewChange: ({ zoom }) => setZoom(Math.round(zoom * 100)),
         onStartText: handleStartText,
+        onEditText: handleEditText,
         onPreMouseDown: handlePreMouseDown,
       });
       setGame(g);
@@ -162,7 +221,7 @@ export default function Canvas({
         g.destroy();
       };
     }
-  }, [roomId, socket, handleStartText, handlePreMouseDown]);
+  }, [roomId, socket, handleStartText, handleEditText, handlePreMouseDown]);
 
   useEffect(() => {
     game?.setTool(selectedTool);
@@ -268,27 +327,43 @@ export default function Canvas({
             className="absolute inset-0 h-full w-full cursor-crosshair rounded-2xl shadow-[0_24px_64px_-24px_rgba(0,0,0,0.8)] ring-1 ring-white/5 touch-none"
           />
 
-          {/* in-place note editor for the text tool */}
+          {/* in-place note editor for the text tool — a floating card that
+              hugs the note and grows with the typing (Excalidraw-style) */}
           {textPos && (
             <textarea
               ref={textareaRef}
               value={textValue}
-              placeholder="Type…"
+              placeholder="Type… ↵ to place"
               onChange={(e) => setTextValue(e.target.value)}
               onBlur={commitTextDraft}
               onKeyDown={(e) => {
-                if (e.key === "Escape" || (e.key === "Enter" && (e.metaKey || e.ctrlKey))) {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  commitTextDraft();
+                } else if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   commitTextDraft();
                 }
               }}
               onMouseDown={(e) => e.stopPropagation()}
-              className="absolute z-30 max-h-[80vh] min-h-7 min-w-10 resize-none overflow-hidden select-text whitespace-pre rounded-md border border-marker/60 bg-transparent px-1 py-0.5 font-sans outline-none"
+              className="absolute z-30 max-h-[80vh] resize-none overflow-hidden select-text whitespace-pre rounded-lg border border-marker/40 bg-white/95 shadow-[0_1px_3px_rgba(24,24,26,0.14),0_12px_28px_-8px_rgba(24,24,26,0.3)] outline-none placeholder:text-inkfaint/70"
               style={{
-                left: textPos.x,
-                top: textPos.y,
+                // Nudge the card up/left by its own chrome (padding + border)
+                // so the text starts exactly at the world-space note point.
+                left: textPos.x - TEXT_BOX_PAD_X - TEXT_BOX_BORDER,
+                top: textPos.y - TEXT_BOX_PAD_Y - TEXT_BOX_BORDER,
+                padding: `${TEXT_BOX_PAD_Y}px ${TEXT_BOX_PAD_X}px`,
+                minWidth:
+                  DEFAULT_FONT_SIZE * game!.getZoom() * 2 +
+                  TEXT_BOX_PAD_X * 2 +
+                  TEXT_BOX_BORDER * 2,
+                minHeight:
+                  DEFAULT_FONT_SIZE * game!.getZoom() * 1.4 +
+                  TEXT_BOX_PAD_Y * 2 +
+                  TEXT_BOX_BORDER * 2,
                 fontSize: `${DEFAULT_FONT_SIZE * game!.getZoom()}px`,
-                lineHeight: DEFAULT_FONT_SIZE * game!.getZoom() * 1.3,
+                lineHeight: `${DEFAULT_FONT_SIZE * game!.getZoom() * 1.3}px`,
+                fontFamily: "ui-sans-serif, system-ui, sans-serif",
                 color: selectedColor,
                 caretColor: selectedColor,
               }}
@@ -405,7 +480,7 @@ export default function Canvas({
             {!panMode && selectedTool === "rect" && "r — bounding box"}
             {!panMode && selectedTool === "circle" && "c — circumscribe"}
             {!panMode && selectedTool === "arrow" && "a — pointer arrow"}
-            {!panMode && selectedTool === "text" && "t — click, then type"}
+            {!panMode && selectedTool === "text" && "t — click, type, Enter to place"}
             {!panMode && selectedTool === "image" && "i — pick a file to embed"}
             {!panMode && selectedTool === "eraser" && "e — erase a stroke"}
           </span>
