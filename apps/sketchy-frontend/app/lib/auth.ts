@@ -25,6 +25,17 @@ export function getRefreshToken(): string | null {
   return window.localStorage.getItem(REFRESH_KEY);
 }
 
+export function getUserIdFromToken(): string | null {
+  const token = getToken();
+  if (!token) return null;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1]!));
+    return typeof payload.userId === "string" ? payload.userId : null;
+  } catch {
+    return null;
+  }
+}
+
 export function setSession(session: Session | null) {
   if (typeof window === "undefined") return;
   if (session) {
