@@ -1,50 +1,71 @@
 import { Tool } from "../components/Canvas";
 import { getExistingShapes } from "./http";
+import { getUserIdFromToken } from "../lib/auth";
 
 export type Shape =
   | {
       id: string;
+      userId?: string;
       type: "rect";
       x: number;
       y: number;
       width: number;
       height: number;
       color: string;
+      strokeWidth: number;
     }
   | {
       id: string;
+      userId?: string;
       type: "circle";
       centerX: number;
       centerY: number;
       radius: number;
       color: string;
+      strokeWidth: number;
     }
   | {
       id: string;
+      userId?: string;
       type: "pencil";
       points: { x: number; y: number }[];
       color: string;
+      strokeWidth: number;
     }
   | {
       id: string;
+      userId?: string;
       type: "arrow";
       startX: number;
       startY: number;
       endX: number;
       endY: number;
       color: string;
+      strokeWidth: number;
     }
   | {
       id: string;
+      userId?: string;
       type: "text";
       x: number;
       y: number;
       text: string;
       fontSize: number;
       color: string;
+      fontFamily: string;
+      strokeWidth: number;
     }
   | {
       id: string;
+      userId?: string;
+      type: "laser";
+      points: { x: number; y: number; t: number }[];
+      color: string;
+      strokeWidth: number;
+    }
+  | {
+      id: string;
+      userId?: string;
       type: "image";
       x: number;
       y: number;
@@ -69,7 +90,21 @@ export const COLORS = [
 export const DEFAULT_COLOR = COLORS[0].value;
 export const DEFAULT_FONT_SIZE = 22;
 
-const FONT_FAMILY = "ui-sans-serif, system-ui, sans-serif";
+export const FONT_FAMILY = "ui-sans-serif, system-ui, sans-serif";
+
+// Typefaces offered to the text tool. Each maps to a font loaded on the page
+// (via the Google Fonts stylesheet in layout.tsx), so canvas rendering can use
+// the family by name. The first entry doubles as the default.
+export const FONTS = [
+  { id: "sans", name: "Sans", value: FONT_FAMILY },
+  { id: "marker", name: "Marker", value: '"Caveat", "Comic Sans MS", cursive' },
+  { id: "mono", name: "Mono", value: '"IBM Plex Mono", ui-monospace, monospace' },
+  { id: "serif", name: "Serif", value: '"Playfair Display", Georgia, serif' },
+  { id: "display", name: "Display", value: '"Bebas Neue", "Arial Narrow", sans-serif' },
+  { id: "comic", name: "Comic", value: '"Comic Neue", "Comic Sans MS", cursive' },
+] as const;
+
+export const DEFAULT_FONT_FAMILY = FONT_FAMILY;
 const TEXT_LINE_HEIGHT = 1.3;
 // Default artboard footprint for an image dropped without a drag gesture.
 const IMAGE_DEFAULT_WIDTH = 200;
@@ -101,6 +136,13 @@ const CURSOR_RESIZE: Record<string, string> = {
   w: "ew-resize",
 };
 
+// Laser pointer: fires on press-and-drag, leaving a beam of light — a soft
+// bloom under a tapering core that fades along its own length, ending in a
+// white-hot tip. Age (ms) controls how long the beam lingers after release.
+const LASER_AGE_MS = 450;
+const LASER_MAX_DOTS = 320;
+const LASER_INTERP_STEP = 3; // screen px between interpolated trail points
+
 // View state for the infinite drafting table: zoom + world-space pan offset.
 export interface ViewState {
   zoom: number;
@@ -121,6 +163,26 @@ interface Bounds {
   maxY: number;
 }
 
+// Undo/redo: one entry per local user action, expressed as an invertible delta
+// that is replayed through the same socket messages the original action used,
+// so the canvas, the server's persistence and every peer stay in agreement.
+type HistoryEntry =
+  | { kind: "add"; shape: Shape }
+  | { kind: "remove"; shape: Shape }
+  | { kind: "update"; before: Shape; after: Shape }
+  | { kind: "clear"; before: Shape[] };
+
+// Cap history so a board of heavy strokes (or a burst of clears) can't grow the
+// stack without bound — memory-cheap deltas, but a clear keeps a full snapshot.
+const HISTORY_LIMIT = 50;
+
+// One fading dot in a laser trail (world coords + birth time).
+interface LaserPoint {
+  x: number;
+  y: number;
+  t: number;
+}
+
 type HandleKey = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 
 const MIN_ZOOM = 0.1;
@@ -136,12 +198,16 @@ export class Game {
   private existingShapes: Shape[];
   private roomId: string;
   private socket: WebSocket;
+  private userId: string | null = null;
   private clicked: boolean;
   private startX = 0;
   private startY = 0;
   private points: { x: number; y: number }[] = [];
   private selectedTool: Tool = "circle";
   private strokeColor: string = DEFAULT_COLOR;
+  private strokeWidth: number = 2;
+  private fontFamily: string = FONT_FAMILY;
+  private backgroundColor = "#f8f6f1";
   private scale = 1;
 
   // Infinite-workspace view: screen = (world − offset) · zoom
@@ -159,6 +225,18 @@ export class Game {
   private remoteCursors = new Map<string, RemoteCursor>();
   private lastPointerSent = 0;
 
+  // Laser pointer: our own beam + the freshest point, and one trail per remote
+  // user actively lasing. Beams only exist while the button is held — releasing
+  // lets the current beam fade out. Trails are ephemeral (never shapes).
+  private laserTrail: LaserPoint[] = [];
+  private laserLatest: { x: number; y: number } | null = null;
+  private lasing = false;
+  private remoteLasers = new Map<string, LaserPoint[]>();
+  // Ink colour each remote user last lased with, so their beam matches their
+  // palette choice (falls back to their presence colour when unknown).
+  private remoteLaserColors = new Map<string, string>();
+  private laserAnimFrame: number | null = null;
+
   // Eraser: id of the shape currently under the cursor, if any.
   private hoveredShapeId: string | null = null;
   // Which resize handle sits under the cursor (selection affordance feedback).
@@ -170,7 +248,13 @@ export class Game {
   // the cursor has travelled far enough for the drag to "engage".
   private dragStartClient = { x: 0, y: 0 };
   private dragEngaged = false;
-  private moveDrag: { shape: Shape; start: { x: number; y: number } } | null = null;
+  private moveDrag: {
+    shape: Shape;
+    start: { x: number; y: number };
+    // Snapshot of the shape at press, so a finished move can be undone (and
+    // redone) back to exactly where it started.
+    before: Shape;
+  } | null = null;
   private resizeDrag: {
     shape: Shape;
     origBounds: Bounds;
@@ -210,6 +294,13 @@ export class Game {
   private onStartText: ((x: number, y: number) => void) | null;
   private onEditText: ((shape: Shape) => void) | null;
   private onPreMouseDown: (() => boolean | void) | null;
+  private onBackgroundChange: ((color: string) => void) | null;
+  private onHistoryChange: ((canUndo: boolean, canRedo: boolean) => void) | null;
+
+  // Undo/redo stacks. Only local actions are recorded — remote room updates
+  // arrive through the socket and are not part of your personal history.
+  private undoStack: HistoryEntry[] = [];
+  private redoStack: HistoryEntry[] = [];
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -220,6 +311,8 @@ export class Game {
       onStartText?: (x: number, y: number) => void;
       onEditText?: (shape: Shape) => void;
       onPreMouseDown?: () => boolean | void;
+      onBackgroundChange?: (color: string) => void;
+      onHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
     } = {}
   ) {
     this.canvas = canvas;
@@ -227,11 +320,14 @@ export class Game {
     this.existingShapes = [];
     this.roomId = roomId;
     this.socket = socket;
+    this.userId = getUserIdFromToken();
     this.clicked = false;
     this.onViewChange = opts.onViewChange ?? null;
     this.onStartText = opts.onStartText ?? null;
     this.onEditText = opts.onEditText ?? null;
     this.onPreMouseDown = opts.onPreMouseDown ?? null;
+    this.onBackgroundChange = opts.onBackgroundChange ?? null;
+    this.onHistoryChange = opts.onHistoryChange ?? null;
     this.configureCanvas();
     this.initHandlers();
     this.initMouseHandlers();
@@ -239,12 +335,31 @@ export class Game {
     // long before the network round-trip for existing shapes resolves.
     this.clearCanvas();
     this.init().catch((err) => console.error("init() failed:", err));
+    // The Google Fonts stylesheet loads typefaces after this module. Once they
+    // are in, re-render so webfont text (which may have painted in its fallback
+    // face) settles into its true typeface.
+    if (typeof document !== "undefined" && "fonts" in document) {
+      document.fonts.ready.then(() => this.clearCanvas());
+    }
   }
 
   setTool(tool: Tool) {
+    const wasLaser = this.selectedTool === "laser";
     this.selectedTool = tool;
     this.dragEngaged = false;
     this.hoveredResizeHandle = null;
+    // Leaving the laser tool clears its ephemeral trail and repaints the
+    // presence layer — the tail is only meant to glow while the beam is active.
+    if (wasLaser && tool !== "laser") {
+      this.lasing = false;
+      this.laserTrail = [];
+      this.laserLatest = null;
+      if (this.laserAnimFrame !== null) {
+        cancelAnimationFrame(this.laserAnimFrame);
+        this.laserAnimFrame = null;
+      }
+      this.clearCanvas();
+    }
     if (tool !== "eraser" && this.hoveredShapeId !== null) {
       this.hoveredShapeId = null;
       this.clearCanvas();
@@ -254,6 +369,23 @@ export class Game {
 
   setColor(color: string) {
     this.strokeColor = color;
+  }
+
+  // Remembered so freshly committed notes keep the font chosen in the toolbar;
+  // existing shapes render with the family stored on each shape.
+  setFontFamily(fontFamily: string) {
+    this.fontFamily = fontFamily;
+  }
+
+  setStrokeWidth(width: number) {
+    this.strokeWidth = Math.max(1, Math.min(20, width));
+    this.clearCanvas();
+  }
+
+  setBackgroundColor(color: string) {
+    if (this.backgroundColor === color) return;
+    this.backgroundColor = color;
+    this.clearCanvas();
   }
 
   setPanMode(on: boolean) {
@@ -291,6 +423,7 @@ export class Game {
       const height = width / ar;
       const shape: Shape = {
         id: newShapeId(),
+        userId: this.userId || undefined,
         type: "image",
         x: cx - width / 2,
         y: cy - height / 2,
@@ -299,6 +432,7 @@ export class Game {
         dataUrl,
       };
       this.existingShapes.push(shape);
+      this.recordHistory({ kind: "add", shape });
       this.selectedShapeId = shape.id;
       this.clearCanvas();
       this.socket.send(
@@ -320,17 +454,27 @@ export class Game {
 
   // Text tool: commit a finished editor buffer as a brand-new text shape and
   // select it, so the freshly placed note shows its bounds handles at once.
-  commitText(x: number, y: number, text: string, fontSize: number, color: string) {
+  commitText(
+    x: number,
+    y: number,
+    text: string,
+    fontSize: number,
+    color: string,
+    fontFamily: string = FONT_FAMILY
+  ) {
     const trimmed = text.trim();
     if (trimmed.length === 0) return;
     const shape: Shape = {
       id: newShapeId(),
+      userId: this.userId || undefined,
       type: "text",
       x,
       y,
       text,
       fontSize,
       color,
+      fontFamily,
+      strokeWidth: this.strokeWidth,
     };
     this.selectedShapeId = shape.id;
     this.addShape(shape);
@@ -344,15 +488,17 @@ export class Game {
     y: number,
     text: string,
     fontSize: number,
-    color: string
+    color: string,
+    fontFamily: string = FONT_FAMILY
   ) {
     const target = this.existingShapes.find((s) => s.id === id);
     if (!target || target.type !== "text") return;
     const trimmed = text.trim();
     if (trimmed.length === 0) return;
-    const updated: Shape = { ...target, x, y, text, fontSize, color };
+    const updated: Shape = { ...target, x, y, text, fontSize, color, fontFamily, strokeWidth: this.strokeWidth };
     const idx = this.existingShapes.findIndex((s) => s.id === id);
     this.existingShapes[idx] = updated;
+    this.recordHistory({ kind: "update", before: target, after: updated });
     this.selectedShapeId = id;
     this.clearCanvas();
     this.socket.send(
@@ -372,8 +518,17 @@ export class Game {
     this.applyZoom(1, canvasCenter(this.canvas));
   }
 
-  // Center the board on whatever has been drawn and reset to 1:1.
+  private getCanvasSize(): { cw: number; ch: number } {
+    const rect = this.canvas?.getBoundingClientRect();
+    const cw = rect?.width || this.canvas?.clientWidth || (typeof window !== "undefined" ? window.innerWidth : 800) || 800;
+    const ch = rect?.height || this.canvas?.clientHeight || (typeof window !== "undefined" ? window.innerHeight : 600) || 600;
+    return { cw, ch };
+  }
+
+  // Bring the whole board back into view: centre on everything that's been
+  // drawn and zoom so it all fits on the desk.
   fitView() {
+    const { cw, ch } = this.getCanvasSize();
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -385,15 +540,23 @@ export class Game {
       maxX = Math.max(maxX, b.maxX);
       maxY = Math.max(maxY, b.maxY);
     }
-    this.zoom = 1;
-    const cw = this.canvas.clientWidth || 1;
-    const ch = this.canvas.clientHeight || 1;
-    if (this.existingShapes.length === 0) {
-      this.offsetX = 0;
-      this.offsetY = 0;
+    if (this.existingShapes.length === 0 || !isFinite(minX) || !isFinite(minY)) {
+      this.zoom = 1;
+      this.offsetX = -cw / 2;
+      this.offsetY = -ch / 2;
     } else {
-      this.offsetX = (minX + maxX) / 2 - cw / 2;
-      this.offsetY = (minY + maxY) / 2 - ch / 2;
+      const margin = 80;
+      const contentW = Math.max(20, maxX - minX);
+      const contentH = Math.max(20, maxY - minY);
+      const fitZoom = Math.min(
+        (cw - margin * 2) / contentW,
+        (ch - margin * 2) / contentH
+      );
+      this.zoom = Math.min(1.2, Math.max(MIN_ZOOM, fitZoom));
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      this.offsetX = centerX - cw / (2 * this.zoom);
+      this.offsetY = centerY - ch / (2 * this.zoom);
     }
     this.clampView();
     this.clearCanvas();
@@ -414,10 +577,9 @@ export class Game {
 
   // Keep the visible window inside the finite board's edges.
   private clampView() {
-    const cw = this.canvas.clientWidth || 1;
-    const ch = this.canvas.clientHeight || 1;
-    const halfW = cw / this.zoom / 2;
-    const halfH = ch / this.zoom / 2;
+    const { cw, ch } = this.getCanvasSize();
+    const halfW = cw / (2 * this.zoom);
+    const halfH = ch / (2 * this.zoom);
     const minX = -WORLD_LIMIT + halfW;
     const maxX = WORLD_LIMIT - halfW;
     const minY = -WORLD_LIMIT + halfH;
@@ -463,13 +625,28 @@ export class Game {
   }
 
   async init() {
-    this.existingShapes = await getExistingShapes(this.roomId);
+    const data = await getExistingShapes(this.roomId);
+    this.existingShapes = data.shapes;
+    // Undo/redo history is personal and session-scoped: a freshly loaded board
+    // (or a brand-new room) starts with a clean slate.
+    this.undoStack = [];
+    this.redoStack = [];
+    this.emitHistory();
+    // Start on the room's shared paper tone (already persisted on the server).
+    if (data.backgroundColor && data.backgroundColor !== this.backgroundColor) {
+      this.backgroundColor = data.backgroundColor;
+      this.onBackgroundChange?.(data.backgroundColor);
+    }
     this.clearCanvas();
     // Land the camera on the existing ink, like a real drafting room.
     this.fitView();
   }
 
   destroy() {
+    if (this.laserAnimFrame !== null) {
+      cancelAnimationFrame(this.laserAnimFrame);
+      this.laserAnimFrame = null;
+    }
     this.canvas?.removeEventListener("mousedown", this.mouseDownHandler);
     this.canvas?.removeEventListener("wheel", this.wheelHandler);
     this.canvas?.removeEventListener("mouseleave", this.mouseLeaveHandler);
@@ -488,7 +665,9 @@ export class Game {
   initHandlers() {
     this.socket.onmessage = (event) => {
       const message = JSON.parse(event.data);
-      if (message.type === "shape" && message.shape) {
+      if (message.type === "self" && typeof message.userId === "string") {
+        this.userId = message.userId;
+      } else if (message.type === "shape" && message.shape) {
         this.upsertShape(message.shape);
         this.scheduleRedraw();
       } else if (message.type === "update" && message.shape) {
@@ -521,7 +700,28 @@ export class Game {
           x: message.x,
           y: message.y,
         });
+        if (message.laser) {
+          const trail = this.remoteLasers.get(message.userId) ?? [];
+          const last = trail[trail.length - 1];
+          const t = Date.now();
+          if (last) {
+            this.fillBetween(trail, last, { x: message.x, y: message.y }, 4, t);
+          } else {
+            trail.push({ x: message.x, y: message.y, t });
+          }
+          if (trail.length > LASER_MAX_DOTS) {
+            trail.splice(0, trail.length - LASER_MAX_DOTS);
+          }
+          this.remoteLasers.set(message.userId, trail);
+          if (typeof message.color === "string" && message.color.length > 0) {
+            this.remoteLaserColors.set(message.userId, message.color);
+          }
+          this.ensureLaserLoop();
+        }
         this.scheduleCursorRedraw();
+      } else if (message.type === "background" && typeof message.backgroundColor === "string") {
+        this.setBackgroundColor(message.backgroundColor);
+        this.onBackgroundChange?.(message.backgroundColor);
       } else if (message.type === "presence_members") {
         (message.members || []).forEach((m: { userId: string; name: string; x: number | null; y: number | null }) => {
           this.setRemoteCursor(m.userId, m.name, m.x, m.y);
@@ -564,19 +764,40 @@ export class Game {
     });
   }
 
-  // Throttled pointer telemetry so the room sees our cursor.
+  // Throttled pointer telemetry so the room sees our cursor. When the laser
+  // tool is hot (and firing), the message also flags it — and carries the ink
+  // colour — so peers draw our beam in the same hue we picked, not a cursor
+  // arrow.
   sendPointer(x: number, y: number) {
     const now = Date.now();
     if (now - this.lastPointerSent < 35) return;
     this.lastPointerSent = now;
+    const lasing = this.selectedTool === "laser" && this.lasing;
     this.socket.send(
-      JSON.stringify({ type: "pointer", roomId: this.roomId, x, y })
+      JSON.stringify({
+        type: "pointer",
+        roomId: this.roomId,
+        x,
+        y,
+        laser: lasing,
+        color: lasing ? this.strokeColor : undefined,
+      })
     );
   }
 
+  private isOwner(shape: Shape | null | undefined): boolean {
+    if (!shape) return false;
+    if (!shape.userId) return true;
+    return shape.userId === this.userId;
+  }
+
   clearBoard() {
+    if (this.existingShapes.length === 0) return;
+    const before = this.existingShapes.slice();
+    this.recordHistory({ kind: "clear", before });
     this.existingShapes = [];
     this.selectedShapeId = null;
+    this.hoveredShapeId = null;
     this.clearCanvas();
     this.socket.send(
       JSON.stringify({ type: "clear", roomId: this.roomId })
@@ -585,6 +806,7 @@ export class Game {
 
   private addShape(shape: Shape) {
     this.existingShapes.push(shape);
+    this.recordHistory({ kind: "add", shape });
     // Refresh immediately so committed shapes (e.g. a finished note) appear on
     // screen at once, rather than waiting for the server echo round-trip.
     this.clearCanvas();
@@ -597,7 +819,8 @@ export class Game {
   // room so the deletion lands for everyone at the same time.
   private eraseShapeAt(wx: number, wy: number) {
     const target = this.shapeAt(wx, wy);
-    if (!target) return;
+    if (!target || !this.isOwner(target)) return;
+    this.recordHistory({ kind: "remove", shape: target });
     this.existingShapes = this.existingShapes.filter((s) => s.id !== target.id);
     // Uncover whatever line was underneath so the cursor can keep erasing.
     const next = this.shapeAt(wx, wy);
@@ -646,7 +869,7 @@ export class Game {
       return wx >= minX && wx <= maxX && wy >= minY && wy <= maxY;
     }
     if (s.type === "text") {
-      const size = this.textSize(s.text, s.fontSize);
+      const size = this.textSize(s.text, s.fontSize, s.fontFamily);
       return (
         wx >= s.x - m &&
         wx <= s.x + size.width + m &&
@@ -657,7 +880,7 @@ export class Game {
     if (s.type === "arrow") {
       const a = { x: s.startX, y: s.startY };
       const b = { x: s.endX, y: s.endY };
-      const head = this.arrowHead(b, a);
+      const head = this.arrowHead(b, a, s.strokeWidth);
       if (
         distToSegment(a, b, wx, wy) <= m ||
         distToSegment(b, head.a, wx, wy) <= m ||
@@ -726,7 +949,7 @@ export class Game {
     const h = this.canvas.clientHeight || 1;
     sc.setTransform(this.scale, 0, 0, this.scale, 0, 0);
     sc.clearRect(0, 0, w, h);
-    sc.fillStyle = "#f8f6f1";
+    sc.fillStyle = this.backgroundColor;
     sc.fillRect(0, 0, w, h);
 
     this.applyWorldTransformTo(sc);
@@ -749,22 +972,275 @@ export class Game {
     this.sceneStale = false;
   }
 
-  // Redraw just the presence-cursor overlay. Cursor telemetry can arrive tens
-  // of times a second per collaborator, so this stays as cheap as possible.
+  // Redraw the presence overlay: laser trails first, then cursor arrows. Cursor
+  // telemetry can arrive tens of times a second per collaborator, so this stays
+  // as cheap as possible.
   private renderCursorLayer() {
     const cc = this.cursorCtx!;
     const w = this.canvas.clientWidth || 1;
     const h = this.canvas.clientHeight || 1;
     cc.setTransform(this.scale, 0, 0, this.scale, 0, 0);
     cc.clearRect(0, 0, w, h);
+
+    // Our own beam in the selected ink colour: the fading tail, then the bright
+    // reticle on top so the tip reads as the hottest point. Idle (not pressed)
+    // the dot dims to a quiet aiming aid; while pressing it burns white-hot.
+    this.laserTrail = this.laserTrail.filter(
+      (p) => Date.now() - p.t < LASER_AGE_MS
+    );
+    this.drawLaserTrail(cc, this.laserTrail, this.strokeColor, this.strokeWidth);
+    if (this.selectedTool === "laser" && this.laserLatest) {
+      this.drawLaserHead(cc, this.laserLatest.x, this.laserLatest.y, this.strokeColor, this.lasing ? 1 : 0.4);
+    }
+
+    // Everyone else's beams, tinted with the ink they lased in (or their
+    // presence colour if we haven't heard their hue yet).
+    const now = Date.now();
+    this.remoteLasers.forEach((trail, userId) => {
+      const live = trail.filter((p) => now - p.t < LASER_AGE_MS);
+      if (live.length === 0) {
+        this.remoteLasers.delete(userId);
+        this.remoteLaserColors.delete(userId);
+        return;
+      }
+      this.remoteLasers.set(userId, live);
+      const name = this.remoteCursors.get(userId)?.name ?? "guest";
+      const color = this.remoteLaserColors.get(userId) ?? presenceColor(name);
+      // For remote users, use a default base width since we don't know their stroke width
+      this.drawLaserTrail(cc, live, color, 2);
+      const last = live[live.length - 1]!;
+      this.drawLaserHead(cc, last.x, last.y, color);
+      this.drawLaserName(cc, (last.x - this.offsetX) * this.zoom, (last.y - this.offsetY) * this.zoom, name);
+    });
+
     if (this.remoteCursors.size === 0) return;
-    this.remoteCursors.forEach((c) => {
+    this.remoteCursors.forEach((c, userId) => {
       if (c.x === null || c.y === null) return;
+      // A lasing collaborator is represented by their beam, not a cursor arrow.
+      if (this.remoteLasers.has(userId)) return;
       const sx = (c.x - this.offsetX) * this.zoom;
       const sy = (c.y - this.offsetY) * this.zoom;
       if (sx < -60 || sx > w + 60 || sy < -40 || sy > h + 40) return;
       this.drawPresenceCursor(cc, sx, sy, c.name);
     });
+  }
+
+  // The beam's glowing tip: a white-hot core wrapped in a coloured halo. Drawn
+  // additively so overlapping glows brighten like real light instead of
+  // darkening at their seams. intensity dips when idle so the dot reads as a
+  // quiet aiming aid, not a live beam.
+  private drawLaserHead(
+    ctx: CanvasRenderingContext2D,
+    worldX: number,
+    worldY: number,
+    color: string,
+    intensity = 1
+  ) {
+    const sx = (worldX - this.offsetX) * this.zoom;
+    const sy = (worldY - this.offsetY) * this.zoom;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    // Wide, barely-there aura.
+    let g = ctx.createRadialGradient(sx, sy, 0, sx, sy, 22);
+    g.addColorStop(0, color);
+    g.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = g;
+    ctx.globalAlpha = 0.34 * intensity;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 22, 0, Math.PI * 2);
+    ctx.fill();
+    // The coloured body.
+    g = ctx.createRadialGradient(sx, sy, 0, sx, sy, 9);
+    g.addColorStop(0, color);
+    g.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = g;
+    ctx.globalAlpha = 0.95 * intensity;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 9, 0, Math.PI * 2);
+    ctx.fill();
+    // White-hot centre — only when actually firing.
+    if (intensity > 0.7) {
+      ctx.fillStyle = "#ffffff";
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // The beam itself: a soft glowing underlay traced along the whole path, a
+  // crisp tapering core that fades as it recedes from the head, and a white-
+  // hot tip at the freshest end. Additive blending keeps it luminous and
+  // seam-free; the taper stops it reading as a constant-width pipe.
+  private drawLaserTrail(
+    ctx: CanvasRenderingContext2D,
+    trail: LaserPoint[],
+    color: string,
+    baseWidth: number = this.strokeWidth
+  ) {
+    const now = Date.now();
+    // World → screen and drop any points older than the beam's lifetime.
+    const pts: { x: number; y: number; life: number }[] = [];
+    for (const p of trail) {
+      const age = now - p.t;
+      if (age >= LASER_AGE_MS) continue;
+      pts.push({
+        x: (p.x - this.offsetX) * this.zoom,
+        y: (p.y - this.offsetY) * this.zoom,
+        life: 1 - age / LASER_AGE_MS,
+      });
+    }
+    if (pts.length < 2) return;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    const trace = () => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0]!.x, pts[0]!.y);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i]!.x, pts[i]!.y);
+      }
+      ctx.stroke();
+    };
+
+    // Scale laser width with the current stroke width setting
+    const base = Math.max(1, baseWidth / 2);
+
+    // Soft outer aura
+    ctx.strokeStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 30;
+    ctx.globalAlpha = 0.2;
+    ctx.lineWidth = 15 * base;
+    trace();
+
+    // The luminous body.
+    ctx.shadowBlur = 14;
+    ctx.globalAlpha = 0.5;
+    ctx.lineWidth = 7 * base;
+    trace();
+    ctx.shadowBlur = 0;
+
+    // Tapering core: thick and bright near the head, thinning to a point and
+    // fading away toward the tail — the "light streak" silhouette.
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1]!;
+      const b = pts[i]!;
+      const life = Math.max(a.life, b.life);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.9 * life;
+      ctx.lineWidth = Math.max(0.5, 5 * base * Math.pow(life, 1.25));
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+
+    // White-hot tip: a short bright stroke at the freshest end of the beam.
+    const hotN = Math.min(8, pts.length - 1);
+    const hotStart = pts.length - 1 - hotN;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.globalAlpha = 0.8;
+    ctx.lineWidth = 2.4 * base;
+    ctx.beginPath();
+    ctx.moveTo(pts[hotStart]!.x, pts[hotStart]!.y);
+    for (let i = hotStart + 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i]!.x, pts[i]!.y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // A slim name tag that floats just under a collaborator's beam tip, so the
+  // trail reads as theirs without the full cursor arrow.
+  private drawLaserName(
+    ctx: CanvasRenderingContext2D,
+    sx: number,
+    sy: number,
+    name: string
+  ) {
+    const label = name || "guest";
+    ctx.save();
+    ctx.font = "600 12px ui-sans-serif, system-ui, sans-serif";
+    const textW = ctx.measureText(label).width;
+    const pillW = textW + 16;
+    const pillH = 20;
+    const px = sx - pillW / 2;
+    const py = sy + 16;
+    ctx.fillStyle = "rgba(28, 28, 36, 0.92)";
+    ctx.beginPath();
+    ctx.roundRect(px, py, pillW, pillH, 6);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, px + (pillW - textW) / 2, py + pillH / 2);
+    ctx.restore();
+  }
+
+  // Push the current cursor onto our own fading trail and make sure the beam
+  // keeps animating (it would otherwise stop as soon as pointer events pause).
+  // Points are interpolated along the move so fast flicks leave a continuous
+  // streak rather than a dotted line.
+  private addLaserPoint(p: { x: number; y: number }) {
+    const step = LASER_INTERP_STEP / this.zoom;
+    const t = Date.now();
+    const last = this.laserTrail[this.laserTrail.length - 1];
+    if (last) {
+      this.fillBetween(this.laserTrail, last, p, step, t);
+    } else {
+      this.laserTrail.push({ x: p.x, y: p.y, t });
+    }
+    if (this.laserTrail.length > LASER_MAX_DOTS) {
+      this.laserTrail.splice(0, this.laserTrail.length - LASER_MAX_DOTS);
+    }
+    this.laserLatest = { x: p.x, y: p.y };
+    this.ensureLaserLoop();
+  }
+
+  // Stamp every world-space step along the from→to segment onto a trail so
+  // sparse cursor telemetry renders as one smooth, unbroken beam.
+  private fillBetween(
+    trail: LaserPoint[],
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    step: number,
+    t: number
+  ) {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dist = Math.hypot(dx, dy);
+    const n = Math.max(1, Math.round(dist / Math.max(step, 0.5)));
+    for (let i = 1; i <= n; i++) {
+      trail.push({ x: from.x + (dx * i) / n, y: from.y + (dy * i) / n, t });
+    }
+  }
+
+  // A cheap rAF loop that keeps fading the beams after the last pointer event.
+  private ensureLaserLoop() {
+    if (this.laserAnimFrame !== null) return;
+    const tick = () => {
+      this.renderCursorLayer();
+      this.composite();
+      if (this.hasLiveLasers()) {
+        this.laserAnimFrame = requestAnimationFrame(tick);
+      } else {
+        this.laserAnimFrame = null;
+      }
+    };
+    this.laserAnimFrame = requestAnimationFrame(tick);
+  }
+
+  private hasLiveLasers(): boolean {
+    if (this.laserTrail.length > 0) return true;
+    for (const trail of this.remoteLasers.values()) {
+      if (trail.length > 0) return true;
+    }
+    return false;
   }
 
   // Blit both cached layers onto the visible canvas, then float a mid-drag
@@ -892,7 +1368,12 @@ export class Game {
     const bottom = this.offsetY + h / this.zoom;
     const left = this.offsetX;
     const right = this.offsetX + w / this.zoom;
-    ctx.strokeStyle = "rgba(24, 24, 26, 0.05)";
+    // Grid and the board's edge frame follow the paper tone: dark paper gets
+    // light hairlines (and vice-versa) so the drafting lines stay visible.
+    const dark = this.isDarkBackground();
+    const gridColor = dark ? "rgba(255, 255, 255, 0.08)" : "rgba(24, 24, 26, 0.05)";
+    const edgeColor = dark ? "rgba(255, 255, 255, 0.18)" : "rgba(24, 24, 26, 0.12)";
+    ctx.strokeStyle = gridColor;
     ctx.lineWidth = 1 / this.zoom;
     // One batched path for the whole grid — a single stroke call instead of
     // one per line, so the scene layer (and any pan frame) is far cheaper.
@@ -907,7 +1388,7 @@ export class Game {
     }
     ctx.stroke();
     // The finite edge of the board — a faint drafting frame.
-    ctx.strokeStyle = "rgba(24, 24, 26, 0.12)";
+    ctx.strokeStyle = edgeColor;
     ctx.lineWidth = 2 / this.zoom;
     ctx.strokeRect(
       -WORLD_LIMIT,
@@ -917,9 +1398,36 @@ export class Game {
     );
   }
 
+  // Rough perceived-luminance check so overlay strokes (grid hairlines, the
+  // board frame) can flip to light when the paper goes dark. Handles the hex
+  // swatches and the native color input's values; unknown formats fall back
+  // to treating the paper as light.
+  private isDarkBackground(): boolean {
+    const c = this.backgroundColor.trim();
+    let r = 255;
+    let g = 255;
+    let b = 255;
+    const hex = c.match(/^#([0-9a-f]{6})$/i);
+    if (hex) {
+      r = parseInt(hex[1]!.slice(0, 2), 16);
+      g = parseInt(hex[1]!.slice(2, 4), 16);
+      b = parseInt(hex[1]!.slice(4, 6), 16);
+    } else {
+      const rgb = c.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+      if (rgb) {
+        r = Number(rgb[1]);
+        g = Number(rgb[2]);
+        b = Number(rgb[3]);
+      }
+    }
+    return 0.299 * r + 0.587 * g + 0.114 * b < 128;
+  }
+
   private drawShape(ctx: CanvasRenderingContext2D, shape: Shape) {
     ctx.strokeStyle = "color" in shape ? shape.color : DEFAULT_COLOR;
-    ctx.lineWidth = 2 / this.zoom;
+    // Use shape's strokeWidth if available, otherwise fall back to current setting
+    const w = "strokeWidth" in shape ? shape.strokeWidth : this.strokeWidth;
+    ctx.lineWidth = w / this.zoom;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     if (shape.type === "rect") {
@@ -944,11 +1452,13 @@ export class Game {
       this.drawArrow(
         ctx,
         { x: shape.startX, y: shape.startY },
-        { x: shape.endX, y: shape.endY }
+        { x: shape.endX, y: shape.endY },
+        shape.strokeWidth
       );
     } else if (shape.type === "text") {
       ctx.fillStyle = shape.color || DEFAULT_COLOR;
-      this.drawText(ctx, shape.text, shape.x, shape.y, shape.fontSize);
+      const w = "strokeWidth" in shape ? shape.strokeWidth : this.strokeWidth;
+      this.drawText(ctx, shape.text, shape.x, shape.y, shape.fontSize, shape.fontFamily, w);
     } else if (shape.type === "image") {
       const img = this.imageFor(shape.dataUrl);
       if (img && img.naturalWidth > 0) {
@@ -962,13 +1472,18 @@ export class Game {
   }
 
   // Two feathered back-edges that make the arrowhead at the tip.
-  private arrowHead(end: { x: number; y: number }, start: { x: number; y: number }) {
+  private arrowHead(
+    end: { x: number; y: number },
+    start: { x: number; y: number },
+    strokeWidth: number = 2
+  ) {
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const len = Math.hypot(dx, dy);
     const ux = len < 1e-6 ? 1 : dx / len;
     const uy = len < 1e-6 ? 0 : dy / len;
-    const headLen = 14;
+    // Scale arrowhead with stroke width for consistent visual weight
+    const headLen = 14 * Math.max(1, strokeWidth / 2);
     const spread = 0.42;
     const ca = Math.cos(spread);
     const sa = Math.sin(spread);
@@ -982,21 +1497,42 @@ export class Game {
       x: end.x - (ux * ca + uy * sa) * headLen,
       y: end.y + (ux * sa - uy * ca) * headLen,
     };
-    return { a, b };
+    return { a, b, ux, uy, headLen };
   }
 
-  // Shaft plus a solid, filled arrowhead at the tip.
+  // Shaft plus a solid, filled arrowhead at the tip. The shaft is butt-capped
+  // and ends a hair past the head's base — inside the filled head — so the head
+  // alone occupies the very end of the arrow and no stroke overlaps or pokes
+  // past the point. The tail keeps its rounded cap via a filled circle.
   private drawArrow(
     ctx: CanvasRenderingContext2D,
     start: { x: number; y: number },
-    end: { x: number; y: number }
+    end: { x: number; y: number },
+    strokeWidth: number = 2
   ) {
+    const head = this.arrowHead(end, start, strokeWidth);
+    const half = strokeWidth / this.zoom / 2;
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const len = Math.hypot(dx, dy);
+    // Stop the shaft just inside the head's covered region so the pointed tip
+    // at `end` is the arrow's true end and the shaft never crosses it.
+    const dec = Math.max(0, Math.min(head.headLen - 2, len));
+    const eBase = {
+      x: end.x - head.ux * dec,
+      y: end.y - head.uy * dec,
+    };
+    ctx.save();
+    ctx.lineCap = "butt";
     ctx.beginPath();
     ctx.moveTo(start.x, start.y);
-    ctx.lineTo(end.x, end.y);
+    ctx.lineTo(eBase.x, eBase.y);
     ctx.stroke();
-    const head = this.arrowHead(end, start);
+    ctx.restore();
     ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath();
+    ctx.arc(start.x, start.y, half, 0, Math.PI * 2);
+    ctx.fill();
     ctx.beginPath();
     ctx.moveTo(end.x, end.y);
     ctx.lineTo(head.a.x, head.a.y);
@@ -1010,19 +1546,29 @@ export class Game {
     text: string,
     x: number,
     y: number,
-    fontSize: number
+    fontSize: number,
+    fontFamily: string = FONT_FAMILY,
+    strokeWidth: number = 0
   ) {
-    ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+    ctx.font = `${fontSize}px ${fontFamily || FONT_FAMILY}`;
     ctx.textBaseline = "top";
     ctx.textAlign = "left";
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
+      if (strokeWidth > 0) {
+        ctx.lineWidth = strokeWidth;
+        ctx.strokeText(lines[i]!, x, y + i * fontSize * TEXT_LINE_HEIGHT);
+      }
       ctx.fillText(lines[i]!, x, y + i * fontSize * TEXT_LINE_HEIGHT);
     }
   }
 
-  private textSize(text: string, fontSize: number): { width: number; height: number } {
-    this.ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+  private textSize(
+    text: string,
+    fontSize: number,
+    fontFamily: string = FONT_FAMILY
+  ): { width: number; height: number } {
+    this.ctx.font = `${fontSize}px ${fontFamily || FONT_FAMILY}`;
     let width = 0;
     const lines = text.split("\n");
     for (const line of lines) {
@@ -1087,16 +1633,18 @@ export class Game {
     } else if (s.type === "arrow") {
       const start = { x: s.startX, y: s.startY };
       const end = { x: s.endX, y: s.endY };
+      const w = s.strokeWidth ?? 2;
+      const head = this.arrowHead(end, start, w);
       ctx.beginPath();
       ctx.moveTo(start.x, start.y);
       ctx.lineTo(end.x, end.y);
-      ctx.lineTo(this.arrowHead(end, start).a.x, this.arrowHead(end, start).a.y);
+      ctx.lineTo(head.a.x, head.a.y);
       ctx.moveTo(end.x, end.y);
-      ctx.lineTo(this.arrowHead(end, start).b.x, this.arrowHead(end, start).b.y);
+      ctx.lineTo(head.b.x, head.b.y);
       ctx.stroke();
       ctx.closePath();
     } else if (s.type === "text") {
-      const size = this.textSize(s.text, s.fontSize);
+      const size = this.textSize(s.text, s.fontSize, s.fontFamily);
       ctx.fillRect(s.x, s.y, size.width, size.height);
       ctx.strokeRect(s.x, s.y, size.width, size.height);
     } else if (s.type === "image") {
@@ -1132,7 +1680,7 @@ export class Game {
       };
     }
     if (s.type === "text") {
-      const size = this.textSize(s.text, s.fontSize);
+      const size = this.textSize(s.text, s.fontSize, s.fontFamily);
       return { minX: s.x, minY: s.y, maxX: s.x + size.width, maxY: s.y + size.height };
     }
     let minX = Infinity;
@@ -1158,7 +1706,7 @@ export class Game {
 
   private startSelectDrag(p: { x: number; y: number }) {
     const hit = this.shapeAt(p.x, p.y);
-    if (hit) {
+    if (hit && this.isOwner(hit)) {
       if (this.selectedShapeId === hit.id) {
         const handle = this.hitHandle(hit.id, p.x, p.y);
         if (handle) {
@@ -1194,7 +1742,7 @@ export class Game {
       }
       this.selectedShapeId = hit.id;
       this.hoveredShapeId = null;
-      this.moveDrag = { shape: hit, start: { x: p.x, y: p.y } };
+      this.moveDrag = { shape: hit, start: { x: p.x, y: p.y }, before: { ...hit } };
       this.clicked = true;
     } else {
       this.selectedShapeId = null;
@@ -1452,6 +2000,132 @@ export class Game {
     );
   }
 
+  private sendShape(shape: Shape) {
+    this.socket.send(
+      JSON.stringify({ type: "shape", shape, roomId: this.roomId })
+    );
+  }
+
+  private sendErase(shapeId: string) {
+    this.socket.send(
+      JSON.stringify({ type: "erase", shapeId, roomId: this.roomId })
+    );
+  }
+
+  private sendClear() {
+    this.socket.send(
+      JSON.stringify({ type: "clear", roomId: this.roomId })
+    );
+  }
+
+  // ---- Undo / redo ----
+
+  private isUserEntry(entry: HistoryEntry): boolean {
+    if (entry.kind === "add" || entry.kind === "remove") {
+      return this.isOwner(entry.shape);
+    }
+    if (entry.kind === "update") {
+      return this.isOwner(entry.before);
+    }
+    if (entry.kind === "clear") {
+      return entry.before.every((s) => this.isOwner(s));
+    }
+    return true;
+  }
+
+  private recordHistory(entry: HistoryEntry) {
+    if (!this.isUserEntry(entry)) return;
+    this.undoStack.push(entry);
+    if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
+    // A fresh action makes the redo trail stale: you can only redo the last
+    // undone action, and only if nothing new happened in between.
+    this.redoStack = [];
+    this.emitHistory();
+  }
+
+  private emitHistory() {
+    this.onHistoryChange?.(
+      this.undoStack.length > 0,
+      this.redoStack.length > 0
+    );
+  }
+
+  undo() {
+    const entry = this.undoStack.pop();
+    if (!entry) return;
+    // Never undo mid-drag: the dragged shape's object is shared with the board
+    // and replaying a delta while the pointer is down would corrupt the drag.
+    if (this.activeDrag()) {
+      this.undoStack.push(entry);
+      return;
+    }
+    this.selectedShapeId = null;
+    this.hoveredShapeId = null;
+    this.applyHistory(entry, "backward");
+    this.redoStack.push(entry);
+    this.emitHistory();
+    this.clearCanvas();
+  }
+
+  redo() {
+    const entry = this.redoStack.pop();
+    if (!entry) return;
+    if (this.activeDrag()) {
+      this.redoStack.push(entry);
+      return;
+    }
+    this.selectedShapeId = null;
+    this.hoveredShapeId = null;
+    this.applyHistory(entry, "forward");
+    this.undoStack.push(entry);
+    this.emitHistory();
+    this.clearCanvas();
+  }
+
+  // Replay a history delta in the given direction. Every branch mirrors how the
+  // original action talked to the room, so the server's copy and every peer
+  // (who receives the broadcast) converge on the same state as this canvas.
+  private applyHistory(entry: HistoryEntry, dir: "forward" | "backward") {
+    if (entry.kind === "add") {
+      if (dir === "backward") {
+        this.existingShapes = this.existingShapes.filter(
+          (s) => s.id !== entry.shape.id
+        );
+        this.sendErase(entry.shape.id);
+      } else {
+        this.existingShapes.push(entry.shape);
+        this.sendShape(entry.shape);
+      }
+    } else if (entry.kind === "remove") {
+      if (dir === "backward") {
+        this.existingShapes.push(entry.shape);
+        this.sendShape(entry.shape);
+      } else {
+        this.existingShapes = this.existingShapes.filter(
+          (s) => s.id !== entry.shape.id
+        );
+        this.sendErase(entry.shape.id);
+      }
+    } else if (entry.kind === "update") {
+      const target = dir === "backward" ? entry.before : entry.after;
+      const idx = this.existingShapes.findIndex((s) => s.id === target.id);
+      if (idx >= 0) this.existingShapes[idx] = target;
+      else this.existingShapes.push(target);
+      this.sendShapeUpdate(target);
+    } else {
+      // kind === "clear"
+      if (dir === "backward") {
+        this.existingShapes = entry.before.slice();
+        for (const s of entry.before) {
+          this.sendShape(s);
+        }
+      } else {
+        this.existingShapes = [];
+        this.sendClear();
+      }
+    }
+  }
+
   private updateCursor() {
     if (this.panning) this.canvas.style.cursor = "grabbing";
     else if (this.panTool || this.spaceDown) this.canvas.style.cursor = "grab";
@@ -1467,6 +2141,7 @@ export class Game {
         this.canvas.style.cursor = "default";
       }
     } else if (this.selectedTool === "text") this.canvas.style.cursor = "text";
+    else if (this.selectedTool === "laser") this.canvas.style.cursor = this.lasing ? "none" : "";
     else this.canvas.style.cursor = "";
   }
 
@@ -1474,7 +2149,8 @@ export class Game {
   // CSS cursor (and any hover highlight) matches — resize handle vs body.
   private updateSelectHover(wx: number, wy: number) {
     const s = this.getSelectedShape();
-    const hoveredId = this.shapeAt(wx, wy)?.id ?? null;
+    const hit = this.shapeAt(wx, wy);
+    const hoveredId = hit && this.isOwner(hit) ? hit.id : null;
     let handle: HandleKey | null = null;
     if (hoveredId && s && hoveredId === s.id) {
       handle = this.hitHandle(s.id, wx, wy);
@@ -1503,6 +2179,12 @@ export class Game {
       this.updateCursor();
       return;
     }
+    // Laser: releasing the button stops the beam — the trail is left to fade.
+    if (this.selectedTool === "laser") {
+      this.lasing = false;
+      this.updateCursor();
+      return;
+    }
     if (!this.clicked) return;
 
     this.clicked = false;
@@ -1512,12 +2194,22 @@ export class Game {
     if (this.selectedTool === "select") {
       this.dragEngaged = false;
       if (this.resizeDrag) {
+        this.recordHistory({
+          kind: "update",
+          before: this.resizeDrag.origShape,
+          after: this.resizeDrag.shape,
+        });
         this.sendShapeUpdate(this.resizeDrag.shape);
         this.resizeDrag = null;
         this.hoveredResizeHandle = null;
         this.updateCursor();
         this.clearCanvas();
       } else if (this.moveDrag) {
+        this.recordHistory({
+          kind: "update",
+          before: this.moveDrag.before,
+          after: this.moveDrag.shape,
+        });
         this.sendShapeUpdate(this.moveDrag.shape);
         this.moveDrag = null;
         this.clearCanvas();
@@ -1551,6 +2243,7 @@ export class Game {
         width: width,
         height: height,
         color: this.strokeColor,
+        strokeWidth: this.strokeWidth,
       };
     } else if (selectedTool === "circle") {
       const radius = Math.max(Math.abs(width), Math.abs(height)) / 2;
@@ -1561,6 +2254,7 @@ export class Game {
         centerX: this.startX + width / 2,
         centerY: this.startY + height / 2,
         color: this.strokeColor,
+        strokeWidth: this.strokeWidth,
       };
     } else if (selectedTool === "pencil") {
       shape = {
@@ -1568,6 +2262,7 @@ export class Game {
         type: "pencil",
         points: this.points,
         color: this.strokeColor,
+        strokeWidth: this.strokeWidth,
       };
       this.points = [];
     } else if (selectedTool === "arrow") {
@@ -1579,6 +2274,7 @@ export class Game {
         endX: x,
         endY: y,
         color: this.strokeColor,
+        strokeWidth: this.strokeWidth,
       };
     }
 
@@ -1586,7 +2282,12 @@ export class Game {
       return;
     }
 
+    if (this.userId) {
+      shape.userId = this.userId;
+    }
+
     this.existingShapes.push(shape);
+    this.recordHistory({ kind: "add", shape });
 
     this.socket.send(
       JSON.stringify({
@@ -1618,6 +2319,14 @@ export class Game {
 
     const p = this.mapToCanvas(e.clientX, e.clientY);
 
+    // Laser: pressing arms the beam, which then follows the cursor while held.
+    if (this.selectedTool === "laser") {
+      this.lasing = true;
+      this.addLaserPoint(p);
+      this.updateCursor();
+      return;
+    }
+
     if (this.selectedTool === "select") {
       this.dragStartClient = { x: e.clientX, y: e.clientY };
       this.dragEngaged = false;
@@ -1633,7 +2342,7 @@ export class Game {
       if (!justCommitted) {
         // Clicking an existing note with the text tool edits it in place.
         const hit = this.shapeAt(p.x, p.y);
-        if (hit && hit.type === "text") {
+        if (hit && hit.type === "text" && this.isOwner(hit)) {
           this.onEditText?.(hit);
           return;
         }
@@ -1662,6 +2371,17 @@ export class Game {
       this.panBy(e.clientX - this.panLastX, e.clientY - this.panLastY);
       this.panLastX = e.clientX;
       this.panLastY = e.clientY;
+      return;
+    }
+    // Laser pointer: while the button is held the beam follows the cursor and
+    // paints no permanent ink; idle, just the dim aiming dot glides along.
+    if (this.selectedTool === "laser") {
+      if (this.lasing) {
+        this.addLaserPoint(p);
+      } else {
+        this.laserLatest = { x: p.x, y: p.y };
+        this.scheduleCursorRedraw();
+      }
       return;
     }
     if (this.selectedTool === "select") {
@@ -1724,7 +2444,7 @@ export class Game {
     const height = p.y - this.startY;
     this.clearCanvas();
     this.ctx.strokeStyle = this.strokeColor;
-    this.ctx.lineWidth = 2 / this.zoom;
+    this.ctx.lineWidth = this.strokeWidth / this.zoom;
     this.ctx.lineCap = "round";
     this.ctx.lineJoin = "round";
     const selectedTool = this.selectedTool;
@@ -1752,7 +2472,8 @@ export class Game {
       this.drawArrow(
         this.ctx,
         { x: this.startX, y: this.startY },
-        { x: p.x, y: p.y }
+        { x: p.x, y: p.y },
+        this.strokeWidth
       );
     }
   };
@@ -1789,6 +2510,10 @@ export class Game {
   };
 
   resetModifiers = () => {
+    if (this.lasing) {
+      this.lasing = false;
+      this.scheduleCursorRedraw();
+    }
     if (this.spaceDown || this.panning) {
       this.spaceDown = false;
       this.panning = false;
@@ -1817,7 +2542,10 @@ export class Game {
 }
 
 function canvasCenter(canvas: HTMLCanvasElement) {
-  return { x: (canvas.clientWidth || 1) / 2, y: (canvas.clientHeight || 1) / 2 };
+  const rect = canvas.getBoundingClientRect();
+  const cw = rect.width || canvas.clientWidth || 800;
+  const ch = rect.height || canvas.clientHeight || 600;
+  return { x: cw / 2, y: ch / 2 };
 }
 
 // Stable per-stroke identity so an eraser can name the exact line to delete,

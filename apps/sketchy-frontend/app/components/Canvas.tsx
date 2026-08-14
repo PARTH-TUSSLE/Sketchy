@@ -6,7 +6,10 @@ import { IconButton } from "../components/IconButton";
 import {
   ArrowLeft,
   ArrowUpRight,
+  ChevronDown,
+  ChevronUp,
   Circle,
+  Crosshair,
   Eraser,
   Frame,
   Hand,
@@ -14,12 +17,14 @@ import {
   MousePointer2,
   Pencil,
   RectangleHorizontal,
+  Redo2,
   Trash2,
   Type,
+  Undo2,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { Game, COLORS, DEFAULT_COLOR, DEFAULT_FONT_SIZE, type Shape } from "../draw/Game";
+import { Game, COLORS, DEFAULT_COLOR, DEFAULT_FONT_SIZE, FONTS, DEFAULT_FONT_FAMILY, type Shape } from "../draw/Game";
 import { processImageFile } from "../draw/image";
 
 // The note editor is a floating card on the paper: inner padding + hairline
@@ -29,6 +34,18 @@ import { processImageFile } from "../draw/image";
 const TEXT_BOX_PAD_X = 14;
 const TEXT_BOX_PAD_Y = 10;
 const TEXT_BOX_BORDER = 1;
+
+// Paper tones offered for the canvas backdrop (the "paper" on the desk).
+const PAPER_COLORS = [
+  { name: "paper", value: "#f8f6f1" },
+  { name: "white", value: "#ffffff" },
+  { name: "mist", value: "#dce4ee" },
+  { name: "sand", value: "#efe2cd" },
+  { name: "sage", value: "#e3ead9" },
+  { name: "graphite", value: "#232329" },
+] as const;
+
+const DEFAULT_PAPER = PAPER_COLORS[0].value;
 
 export default function Canvas({
   roomId,
@@ -47,8 +64,14 @@ export default function Canvas({
 
   const [selectedTool, setSelectedTool] = useState<Tool>("pencil");
   const [selectedColor, setSelectedColor] = useState<string>(DEFAULT_COLOR);
+  const [selectedFont, setSelectedFont] = useState<string>(DEFAULT_FONT_FAMILY);
+  const [backgroundColor, setBackgroundColor] = useState<string>(DEFAULT_PAPER);
+  const [strokeWidth, setStrokeWidth] = useState<number>(2);
   const [panMode, setPanMode] = useState(false);
+  const [toolbarOpen, setToolbarOpen] = useState(true);
   const [zoom, setZoom] = useState(100);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
   const [game, setGame] = useState<Game>();
 
   // In-place note editing for the text tool.
@@ -59,6 +82,8 @@ export default function Canvas({
   gameRef.current = game;
   const colorRef = useRef(selectedColor);
   colorRef.current = selectedColor;
+  const fontRef = useRef(selectedFont);
+  fontRef.current = selectedFont;
   const textValueRef = useRef(textValue);
   textValueRef.current = textValue;
   const textDraftRef = useRef(textDraft);
@@ -100,10 +125,11 @@ export default function Canvas({
           draft.y,
           value,
           DEFAULT_FONT_SIZE,
-          colorRef.current
+          colorRef.current,
+          fontRef.current
         );
       } else {
-        gameRef.current.commitText(draft.x, draft.y, value, DEFAULT_FONT_SIZE, colorRef.current);
+        gameRef.current.commitText(draft.x, draft.y, value, DEFAULT_FONT_SIZE, colorRef.current, fontRef.current);
       }
     }
     return true;
@@ -124,12 +150,12 @@ export default function Canvas({
     t.style.height = `${Math.ceil(h) + chrome}px`;
   }, []);
 
-  const selectTool = (t: Tool) => {
+  const selectTool = useCallback((t: Tool) => {
     commitTextDraft();
     if (t === "text") suppressTextStartRef.current = false;
     setSelectedTool(t);
     setPanMode(false);
-  };
+  }, [commitTextDraft]);
 
   const pickImage = () => {
     fileInputRef.current?.click();
@@ -167,12 +193,14 @@ export default function Canvas({
   );
 
   // The text tool clicked an existing note: re-open it in place, pre-filled,
-  // and pick up its ink colour so what you see matches what you're editing.
+  // and pick up its ink colour and typeface so what you see matches what you're
+  // editing.
   const handleEditText = useCallback((shape: Shape) => {
     if (shape.type !== "text") return;
     commitTextDraft();
     editingTextIdRef.current = shape.id;
     setSelectedColor(shape.color);
+    setSelectedFont(shape.fontFamily || DEFAULT_FONT_FAMILY);
     setTextDraft({ x: shape.x, y: shape.y });
     setTextValue(shape.text);
   }, [commitTextDraft]);
@@ -207,6 +235,22 @@ export default function Canvas({
     }
   }, [textDraft, textValue, resizeTextArea]);
 
+  // Background the room settled on. Tracks the last value we broadcast so a
+  // change that arrived from someone else isn't echoed straight back to the
+  // server (and every other client) as if we'd picked it ourselves.
+  const lastSentBackgroundRef = useRef<string | null>(DEFAULT_PAPER);
+
+  const handleBackgroundChange = useCallback((color: string) => {
+    lastSentBackgroundRef.current = color;
+    setBackgroundColor(color);
+  }, []);
+
+  // Drives the enabled state of the undo/redo buttons when history changes.
+  const handleHistoryChange = useCallback((undo: boolean, redo: boolean) => {
+    setCanUndo(undo);
+    setCanRedo(redo);
+  }, []);
+
   useEffect(() => {
     if (canvasRef.current) {
       const g = new Game(canvasRef.current, roomId, socket, {
@@ -214,6 +258,8 @@ export default function Canvas({
         onStartText: handleStartText,
         onEditText: handleEditText,
         onPreMouseDown: handlePreMouseDown,
+        onBackgroundChange: handleBackgroundChange,
+        onHistoryChange: handleHistoryChange,
       });
       setGame(g);
 
@@ -221,7 +267,7 @@ export default function Canvas({
         g.destroy();
       };
     }
-  }, [roomId, socket, handleStartText, handleEditText, handlePreMouseDown]);
+  }, [roomId, socket, handleStartText, handleEditText, handlePreMouseDown, handleBackgroundChange, handleHistoryChange]);
 
   useEffect(() => {
     game?.setTool(selectedTool);
@@ -236,9 +282,34 @@ export default function Canvas({
   }, [panMode, game]);
 
   useEffect(() => {
+    game?.setFontFamily(selectedFont);
+  }, [selectedFont, game]);
+
+  useEffect(() => {
+    game?.setBackgroundColor(backgroundColor);
+    if (backgroundColor !== lastSentBackgroundRef.current) {
+      lastSentBackgroundRef.current = backgroundColor;
+      socket.send(
+        JSON.stringify({ type: "background", roomId, backgroundColor })
+      );
+    }
+  }, [backgroundColor, game, socket, roomId]);
+
+  useEffect(() => {
+    game?.setStrokeWidth(strokeWidth);
+  }, [strokeWidth, game]);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
-      if (e.key === "v" || e.key === "V") selectTool("select");
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) game?.redo();
+        else game?.undo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        game?.redo();
+      } else if (e.key === "v" || e.key === "V") selectTool("select");
       else if (e.key === "p" || e.key === "P") selectTool("pencil");
       else if (e.key === "r" || e.key === "R") selectTool("rect");
       else if (e.key === "c" || e.key === "C") selectTool("circle");
@@ -248,6 +319,7 @@ export default function Canvas({
         selectTool("image");
         pickImage();
       } else if (e.key === "e" || e.key === "E") selectTool("eraser");
+      else if (e.key === "g" || e.key === "G") selectTool("laser");
       else if (e.key === "h" || e.key === "H") setPanMode((m) => !m);
       else if (e.key === "+" || e.key === "=") game?.zoomIn();
       else if (e.key === "-" || e.key === "_") game?.zoomOut();
@@ -258,7 +330,7 @@ export default function Canvas({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [game]);
+  }, [game, selectTool]);
 
   const trackCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -363,7 +435,7 @@ export default function Canvas({
                   TEXT_BOX_BORDER * 2,
                 fontSize: `${DEFAULT_FONT_SIZE * game!.getZoom()}px`,
                 lineHeight: `${DEFAULT_FONT_SIZE * game!.getZoom() * 1.3}px`,
-                fontFamily: "ui-sans-serif, system-ui, sans-serif",
+                fontFamily: selectedFont,
                 color: selectedColor,
                 caretColor: selectedColor,
               }}
@@ -371,7 +443,8 @@ export default function Canvas({
           )}
         </div>
 
-        {/* drafting ruler toolbar */}
+        {/* drafting ruler toolbar — collapsible so the paper stays unobstructed */}
+        {toolbarOpen ? (
         <div className="absolute bottom-5 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-2xl border border-white/10 bg-[#1c1c24]/90 p-1.5 pl-3 shadow-[0_16px_40px_-16px_rgba(0,0,0,0.9)] backdrop-blur-md">
           <span className="anno mr-2 inline-flex items-center gap-1 border-r border-white/10 pr-3 text-paper/40">
             tools
@@ -435,6 +508,13 @@ export default function Canvas({
             label="Eraser (E)"
             onClick={() => selectTool("eraser")}
           />
+          <IconButton
+            tone="dark"
+            activated={selectedTool === "laser"}
+            icon={<Crosshair size={18} />}
+            label="Laser pointer (G)"
+            onClick={() => selectTool("laser")}
+          />
           <span className="mx-1.5 h-6 w-px bg-white/10" />
           <IconButton
             tone="dark"
@@ -460,6 +540,103 @@ export default function Canvas({
                 style={{ backgroundColor: c.value }}
               />
             ))}
+            {/* custom tool colour picker */}
+            <label
+              title="Custom tool colour"
+              className="relative flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-md border border-white/30 transition-transform duration-150 hover:scale-110"
+              style={{
+                background:
+                  "conic-gradient(#e03131, #fcc419, #40c057, #228be6, #e03131)",
+              }}
+            >
+              <input
+                type="color"
+                value={selectedColor}
+                onChange={(e) => setSelectedColor(e.target.value)}
+                aria-label="Custom tool colour"
+                className="absolute inset-0 cursor-pointer opacity-0"
+              />
+            </label>
+          </div>
+          <span className="mx-1.5 h-6 w-px bg-white/10" />
+
+          {/* typeface for the text tool — only relevant while the text tool is active */}
+          {selectedTool === "text" && (
+            <>
+              <span className="mx-1.5 h-6 w-px bg-white/10" />
+              <select
+                value={selectedFont}
+                onChange={(e) => setSelectedFont(e.target.value)}
+                aria-label="Text font"
+                title="Text font"
+                style={{ fontFamily: selectedFont }}
+                className="h-10 cursor-pointer rounded-lg border border-white/10 bg-[#141419]/95 px-2 text-sm text-paper outline-none transition-colors hover:bg-[#1c1c24] focus-visible:border-marker/60"
+              >
+                {FONTS.map((f) => (
+                  <option key={f.id} value={f.value} style={{ fontFamily: f.value }}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
+
+          {/* stroke width */}
+          <span className="anno ml-2 border-l border-white/10 pl-3 text-paper/40">
+            width
+          </span>
+          <div className="flex items-center gap-2 px-2">
+            <input
+              type="range"
+              min="1"
+              max="20"
+              value={strokeWidth}
+              onChange={(e) => setStrokeWidth(Number(e.target.value))}
+              className="w-24 h-2 accent-marker cursor-pointer"
+              aria-label="Stroke width"
+              title={`Stroke width: ${strokeWidth}`}
+            />
+            <span className="anno w-6 text-right text-paper/60">{strokeWidth}</span>
+          </div>
+          <span className="mx-1.5 h-6 w-px bg-white/10" />
+
+          {/* paper (canvas background) tones */}
+          <span className="anno ml-2 border-l border-white/10 pl-3 text-paper/40">
+            paper
+          </span>
+          <div className="flex items-center gap-1.5 px-1">
+            {PAPER_COLORS.map((p) => (
+              <button
+                key={p.value}
+                type="button"
+                aria-label={`${p.name} paper`}
+                aria-pressed={backgroundColor === p.value}
+                title={`${p.name} paper`}
+                onClick={() => setBackgroundColor(p.value)}
+                className={`h-5 w-5 shrink-0 cursor-pointer rounded-md border border-white/30 transition-transform duration-150 hover:scale-110 ${
+                  backgroundColor === p.value
+                    ? "scale-110 ring-2 ring-white ring-offset-2 ring-offset-[#1c1c24]"
+                    : ""
+                }`}
+                style={{ backgroundColor: p.value }}
+              />
+            ))}
+            <label
+              title="Custom paper colour"
+              className="relative flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-md border border-white/30 transition-transform duration-150 hover:scale-110"
+              style={{
+                background:
+                  "conic-gradient(#e03131, #fcc419, #40c057, #228be6, #e03131)",
+              }}
+            >
+              <input
+                type="color"
+                value={backgroundColor}
+                onChange={(e) => setBackgroundColor(e.target.value)}
+                aria-label="Custom paper colour"
+                className="absolute inset-0 cursor-pointer opacity-0"
+              />
+            </label>
           </div>
           <span className="mx-1.5 h-6 w-px bg-white/10" />
           <IconButton
@@ -469,7 +646,28 @@ export default function Canvas({
             label="Clear entire board"
             onClick={() => game?.clearBoard()}
           />
+          <span className="mx-1.5 h-6 w-px bg-white/10" />
+          <IconButton
+            tone="dark"
+            activated={false}
+            icon={<ChevronDown size={18} />}
+            label="Collapse toolbar"
+            onClick={() => setToolbarOpen(false)}
+          />
         </div>
+      ) : (
+        /* collapsed: a single pill that re-opens the drafting ruler */
+        <button
+          type="button"
+          aria-label="Expand toolbar"
+          title="Expand toolbar"
+          onClick={() => setToolbarOpen(true)}
+          className="absolute bottom-5 left-1/2 z-20 flex -translate-x-1/2 cursor-pointer items-center gap-2 rounded-full border border-white/10 bg-[#1c1c24]/90 px-4 py-2.5 text-paper/70 shadow-[0_16px_40px_-16px_rgba(0,0,0,0.9)] backdrop-blur-md transition-colors hover:bg-[#141419] hover:text-paper"
+        >
+          <ChevronUp size={16} />
+          <span className="anno text-paper/50">drafting tools</span>
+        </button>
+      )}
 
         {/* tool hint */}
         <div className="absolute bottom-6 right-5 hidden sm:block">
@@ -483,6 +681,7 @@ export default function Canvas({
             {!panMode && selectedTool === "text" && "t — click, type, Enter to place"}
             {!panMode && selectedTool === "image" && "i — pick a file to embed"}
             {!panMode && selectedTool === "eraser" && "e — erase a stroke"}
+            {!panMode && selectedTool === "laser" && "g — point, leave a fading trail"}
           </span>
           <span className="anno ml-3 text-paper/25">1–9 ink · space pan · ⌃+scroll zoom</span>
         </div>
@@ -502,8 +701,30 @@ export default function Canvas({
           <span ref={coordsRef} className="anno w-32 text-paper/40">
             x 0 · y 0
           </span>
-          <span className="hidden h-4 w-px bg-white/10 sm:block" />
-          <div className="hidden items-center rounded-lg border border-white/10 bg-white/5 p-0.5 sm:flex">
+          <span className="h-4 w-px bg-white/10" />
+          <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-0.5">
+            <button
+              type="button"
+              aria-label="Undo last change"
+              title="Undo (Ctrl+Z)"
+              onClick={() => game?.undo()}
+              disabled={!canUndo}
+              className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-paper/60 transition-colors hover:bg-white/10 hover:text-paper disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-paper/60"
+            >
+              <Undo2 size={13} />
+            </button>
+            <button
+              type="button"
+              aria-label="Redo last change"
+              title="Redo (Ctrl+Shift+Z)"
+              onClick={() => game?.redo()}
+              disabled={!canRedo}
+              className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-md text-paper/60 transition-colors hover:bg-white/10 hover:text-paper disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-paper/60"
+            >
+              <Redo2 size={13} />
+            </button>
+          </div>
+          <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-0.5">
             <button
               type="button"
               aria-label="Zoom out"
@@ -533,12 +754,13 @@ export default function Canvas({
             </button>
             <button
               type="button"
-              aria-label="Center on drawing"
-              title="Center on drawing"
+              aria-label="Scroll back to content"
+              title="Scroll back to content"
               onClick={() => game?.fitView()}
-              className="mx-0.5 flex h-6 w-6 cursor-pointer items-center justify-center rounded-md border-l border-white/10 text-paper/60 transition-colors hover:bg-white/10 hover:text-paper"
+              className="mx-0.5 flex h-6 cursor-pointer items-center gap-1.5 rounded-md border-l border-white/10 px-2 text-paper/70 transition-colors hover:bg-white/10 hover:text-paper"
             >
               <Frame size={13} />
+              <span className="hidden text-[11px] font-medium sm:inline">Scroll back to content</span>
             </button>
           </div>
         </div>
@@ -551,4 +773,4 @@ export default function Canvas({
   );
 }
 
-export type Tool = "pencil" | "rect" | "circle" | "arrow" | "text" | "image" | "select" | "eraser";
+export type Tool = "pencil" | "rect" | "circle" | "arrow" | "text" | "image" | "select" | "eraser" | "laser";
