@@ -228,7 +228,10 @@ app.get("/shapes/:roomId", middleware, async (req, res) => {
       take: 5000,
     });
 
-    return res.json({ shapes });
+    return res.json({
+      shapes,
+      backgroundColor: room.backgroundColor,
+    });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ msg: "Failed to load shapes" });

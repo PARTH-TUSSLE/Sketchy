@@ -103,6 +103,26 @@ wss.on("connection", function connection(ws, request) {
       const next = joinRoom(user, roomId);
       user.rooms = next.rooms;
 
+      // Hand the newcomer the room's shared paper tone so a fresh paint job
+      // lands on the same backdrop the rest of the room is using.
+      try {
+        const room = await prismaClient.room.findUnique({
+          where: { id: roomId },
+          select: { backgroundColor: true },
+        });
+        if (room?.backgroundColor) {
+          ws.send(
+            JSON.stringify({
+              type: "background",
+              roomId: roomId.toString(),
+              backgroundColor: room.backgroundColor,
+            })
+          );
+        }
+      } catch (error) {
+        console.error("Failed to load room background:", error);
+      }
+
       // Hand the newcomer the room roster already sat at the table, with the
       // last known cursor position so their labels render immediately.
       const members = users
@@ -167,6 +187,7 @@ wss.on("connection", function connection(ws, request) {
           name: user.name,
           x,
           y,
+          laser: parsedData?.laser === true,
         },
         except(ws)
       );
@@ -200,6 +221,37 @@ wss.on("connection", function connection(ws, request) {
         message: parse.data.message,
         roomId: roomId.toString(),
       });
+      return;
+    }
+
+    if (type === "background") {
+      const backgroundColor = parsedData?.backgroundColor;
+      if (
+        roomId === null ||
+        typeof backgroundColor !== "string" ||
+        backgroundColor.length === 0 ||
+        backgroundColor.length > 40 ||
+        !/^(#[0-9a-f]{3,8}|rgba?\([^)]*\))$/i.test(backgroundColor)
+      ) {
+        return;
+      }
+
+      // Tell the room (skipping the painter) and persist so the next reload or
+      // late joiner starts on the same paper.
+      broadcast(
+        roomId,
+        { type: "background", roomId: roomId.toString(), backgroundColor },
+        except(ws)
+      );
+
+      try {
+        await prismaClient.room.update({
+          where: { id: roomId },
+          data: { backgroundColor },
+        });
+      } catch (error) {
+        console.error("Failed to persist background:", error);
+      }
       return;
     }
 
