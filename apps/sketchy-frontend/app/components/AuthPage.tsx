@@ -4,9 +4,10 @@ import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import axios from "axios";
-import { ArrowRight, Loader2 } from "lucide-react";
+import { ArrowRight, Loader2, ArrowLeft } from "lucide-react";
 import { BACKEND_URL } from "../config";
 import { setSession, scheduleTokenRefresh } from "../lib/auth";
+import { Nav } from "./landing/Nav";
 
 export function AuthPage({ isSignin }: { isSignin: boolean }) {
   const router = useRouter();
@@ -75,56 +76,67 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
     next ? `${path}?next=${encodeURIComponent(next)}` : path;
 
   return (
-    <div className="board-grid relative flex min-h-screen items-center justify-center overflow-hidden px-6 py-24">
-      <div className="relative w-full max-w-md">
-        <div className="corner-marks card bg-paper/90 p-8 shadow-2xl shadow-ink/5 backdrop-blur-sm sm:p-10">
-          <Link
-            href="/"
-            className="mb-10 flex items-baseline gap-1.5 self-start"
-          >
-            <span className="font-[var(--font-serif)] text-2xl italic text-ink">
-              Sketchy
-            </span>
-            <span className="h-[6px] w-[6px] translate-y-[-2px] rounded-full bg-marker" />
-          </Link>
+    <>
+      <Nav />
+      <div className="board-grid relative flex min-h-screen items-center justify-center overflow-hidden px-4 pt-24 pb-16 sm:px-6 sm:py-24">
+        <div className="relative w-full max-w-md">
+          <div className="corner-marks card bg-paper/95 p-7 shadow-2xl shadow-ink/8 backdrop-blur-md sm:p-10 border-line">
+            <div className="flex items-center justify-between mb-8">
+              <Link
+                href="/"
+                className="flex items-baseline gap-1.5 select-none group"
+              >
+                <span className="font-[var(--font-serif)] text-2xl italic text-ink">
+                  Sketchy
+                </span>
+                <span className="h-[6px] w-[6px] translate-y-[-2px] rounded-full bg-marker transition-all duration-300 group-hover:scale-125" />
+              </Link>
+              <Link
+                href="/"
+                className="flex items-center gap-1 text-xs font-mono uppercase tracking-wider text-inksoft hover:text-marker transition-colors"
+              >
+                <ArrowLeft size={13} />
+                <span>Home</span>
+              </Link>
+            </div>
 
-          <p className="anno mb-3">{isSignin ? "welcome back" : "new room"}</p>
-          <h1 className="text-3xl font-semibold leading-tight tracking-[-0.03em]">
+          <p className="anno mb-2.5 text-marker font-semibold">{isSignin ? "welcome back" : "new room"}</p>
+          <h1 className="text-2xl sm:text-3xl font-semibold leading-tight tracking-[-0.03em] text-ink">
             {title}
           </h1>
-          <p className="mt-3 text-[15px] leading-relaxed text-inksoft">
+          <p className="mt-2.5 text-[14.5px] leading-relaxed text-inksoft">
             {subtitle}
           </p>
 
-          <form onSubmit={onSubmit} className="mt-9 flex flex-col gap-5">
+          <form onSubmit={onSubmit} className="mt-8 flex flex-col gap-4.5">
             {!isSignin && (
-              <label className="flex flex-col gap-2">
-                <span className="anno">your name</span>
+              <label className="flex flex-col gap-1.5">
+                <span className="anno text-[11px]">your name</span>
                 <input
                   type="text"
                   placeholder="e.g. Ada"
                   value={form.name}
                   onChange={onChange("name")}
                   required
-                  className="rounded-lg border border-line bg-paper px-4 py-3 text-[15px] text-ink outline-none transition-colors placeholder:text-inkfaint focus:border-ink"
+                  className="rounded-xl border border-line bg-paper-card px-4 py-2.5 text-[15px] text-ink outline-none transition-all placeholder:text-inkfaint focus:border-ink focus:ring-1 focus:ring-ink"
                 />
               </label>
             )}
 
-            <label className="flex flex-col gap-2">
-              <span className="anno">email</span>
+            <label className="flex flex-col gap-1.5">
+              <span className="anno text-[11px]">email</span>
               <input
                 type="email"
                 placeholder="you@crossing.com"
                 value={form.email}
                 onChange={onChange("email")}
                 required
-                className="rounded-lg border border-line bg-white px-4 py-3 text-[15px] text-ink outline-none transition-colors placeholder:text-inkfaint focus:border-ink"
+                className="rounded-xl border border-line bg-paper-card px-4 py-2.5 text-[15px] text-ink outline-none transition-all placeholder:text-inkfaint focus:border-ink focus:ring-1 focus:ring-ink"
               />
             </label>
 
-            <label className="flex flex-col gap-2">
-              <span className="anno">password</span>
+            <label className="flex flex-col gap-1.5">
+              <span className="anno text-[11px]">password</span>
               <input
                 type="password"
                 placeholder={isSignin ? "your key" : "8+ characters"}
@@ -132,12 +144,12 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
                 onChange={onChange("password")}
                 minLength={8}
                 required
-                className="rounded-lg border border-line bg-white px-4 py-3 text-[15px] text-ink outline-none transition-colors placeholder:text-inkfaint focus:border-ink"
+                className="rounded-xl border border-line bg-paper-card px-4 py-2.5 text-[15px] text-ink outline-none transition-all placeholder:text-inkfaint focus:border-ink focus:ring-1 focus:ring-ink"
               />
             </label>
 
             {error && (
-              <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+              <p className="rounded-xl border border-red-200 bg-red-50/80 px-4 py-2.5 text-xs text-red-600 font-medium">
                 {error}
               </p>
             )}
@@ -145,32 +157,32 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
             <button
               type="submit"
               disabled={loading}
-              className="btn btn-ink mt-1 w-full disabled:opacity-60"
+              className="btn btn-ink mt-2 w-full group !py-3 disabled:opacity-60"
             >
               {loading ? (
                 <Loader2 size={18} className="animate-spin" />
               ) : (
                 <>
-                  {isSignin ? "Sign in" : "Create my room"}
-                  <ArrowRight size={17} className="group-hover:translate-x-0.5" />
+                  <span>{isSignin ? "Sign in" : "Create my room"}</span>
+                  <ArrowRight size={17} className="transition-transform duration-200 group-hover:translate-x-1" />
                 </>
               )}
             </button>
           </form>
 
           <div className="hairline-t mt-8 pt-6">
-            <p className="anno text-center">
+            <p className="anno text-center text-[11px]">
               {isSignin ? (
                 <>
                   new to the board?{" "}
-                  <Link href={hrefFor("/signup")} className="text-marker hover:text-ink">
+                  <Link href={hrefFor("/signup")} className="text-marker font-semibold hover:text-ink transition-colors">
                     create an account
                   </Link>
                 </>
               ) : (
                 <>
                   already drawing?{" "}
-                  <Link href={hrefFor("/signin")} className="text-marker underline-offset-2 hover:text-ink">
+                  <Link href={hrefFor("/signin")} className="text-marker font-semibold hover:text-ink transition-colors">
                     sign in
                   </Link>
                 </>
@@ -179,10 +191,11 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
           </div>
         </div>
 
-        <p className="anno absolute -right-1 -top-4 rotate-1 text-inkfaint">
+        <p className="anno absolute -right-1 -top-4 rotate-1 text-inkfaint/60 hidden sm:block">
           x 0 · y 0
         </p>
       </div>
     </div>
+    </>
   );
 }

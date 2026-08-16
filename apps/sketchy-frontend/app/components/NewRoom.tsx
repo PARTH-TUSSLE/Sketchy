@@ -4,9 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import axios from "axios";
-import { ArrowRight, Loader2, LogIn } from "lucide-react";
+import { ArrowRight, Loader2, LogIn, ArrowLeft } from "lucide-react";
 import { BACKEND_URL } from "../config";
 import { ensureFreshToken, scheduleTokenRefresh } from "../lib/auth";
+import { Nav } from "./landing/Nav";
 
 export function NewRoom() {
   const router = useRouter();
@@ -63,12 +64,12 @@ function CreateRoomFlow({
     setBusy("create");
 
     try {
-      const res = await axios.post(
+      await axios.post(
         `${BACKEND_URL}/room`,
         { name: slug },
         { headers: { Authorization: token } }
       );
-      routerPush(`/canvas/${res.data.roomId}`);
+      routerPush(`/canvas/${encodeURIComponent(name.trim())}`);
     } catch (err: unknown) {
       if (axios.isAxiosError(err) && err.response?.status === 409) {
         setError(
@@ -93,35 +94,46 @@ function CreateRoomFlow({
   }
 
   return (
-    <div className="board-grid relative flex min-h-screen items-center justify-center overflow-hidden px-6 py-24">
-      <div className="relative w-full max-w-md">
-        <div className="corner-marks card bg-paper/90 p-8 shadow-2xl shadow-ink/5 backdrop-blur-sm sm:p-10">
-          <Link
-            href="/"
-            className="mb-10 flex items-baseline gap-1.5 self-start"
-          >
-            <span className="font-[var(--font-serif)] text-2xl italic text-ink">
-              Sketchy
-            </span>
-            <span className="h-[6px] w-[6px] translate-y-[-2px] rounded-full bg-marker" />
-          </Link>
+    <>
+      <Nav />
+      <div className="board-grid relative flex min-h-screen items-center justify-center overflow-hidden px-4 pt-24 pb-16 sm:px-6 sm:py-24">
+        <div className="relative w-full max-w-md">
+          <div className="corner-marks card bg-paper/95 p-7 shadow-2xl shadow-ink/8 backdrop-blur-md sm:p-10 border-line">
+            <div className="flex items-center justify-between mb-8">
+              <Link
+                href="/"
+                className="flex items-baseline gap-1.5 select-none group"
+              >
+                <span className="font-[var(--font-serif)] text-2xl italic text-ink">
+                  Sketchy
+                </span>
+                <span className="h-[6px] w-[6px] translate-y-[-2px] rounded-full bg-marker transition-all duration-300 group-hover:scale-125" />
+              </Link>
+              <Link
+                href="/"
+                className="flex items-center gap-1 text-xs font-mono uppercase tracking-wider text-inksoft hover:text-marker transition-colors"
+              >
+                <ArrowLeft size={13} />
+                <span>Home</span>
+              </Link>
+            </div>
 
-          <p className="anno mb-3">the studio door</p>
-          <h1 className="text-3xl font-semibold leading-tight tracking-[-0.03em]">
+          <p className="anno mb-2.5 text-marker font-semibold">the studio door</p>
+          <h1 className="text-2xl sm:text-3xl font-semibold leading-tight tracking-[-0.03em] text-ink">
             Name the room.
             <br />
-            <span className="font-[var(--font-serif)] italic font-normal">
+            <span className="font-[var(--font-serif)] italic font-normal text-ink/90">
               Invite the board.
             </span>
           </h1>
-          <p className="mt-3 text-[15px] leading-relaxed text-inksoft">
+          <p className="mt-2.5 text-[14.5px] leading-relaxed text-inksoft">
             Give it a short name. Anyone who knows it can draw there — everyone
             sees the same strokes, live.
           </p>
 
-          <div className="mt-9 flex flex-col gap-5">
-            <label className="flex flex-col gap-2">
-              <span className="anno">room name</span>
+          <div className="mt-8 flex flex-col gap-5">
+            <label className="flex flex-col gap-1.5">
+              <span className="anno text-[11px]">room name</span>
               <div className="flex gap-2">
                 <input
                   ref={nameRef}
@@ -132,12 +144,12 @@ function CreateRoomFlow({
                   onKeyDown={(e) => e.key === "Enter" && create()}
                   maxLength={30}
                   autoFocus
-                  className="w-full rounded-lg border border-line bg-white px-4 py-3 text-[15px] text-ink outline-none transition-colors placeholder:text-inkfaint focus:border-ink"
+                  className="w-full rounded-xl border border-line bg-paper-card px-4 py-2.5 text-[15px] text-ink outline-none transition-all placeholder:text-inkfaint focus:border-ink focus:ring-1 focus:ring-ink"
                 />
                 <button
                   onClick={create}
                   disabled={busy === "create"}
-                  className="btn btn-ink shrink-0 px-4 disabled:opacity-60"
+                  className="btn btn-ink shrink-0 !px-4 disabled:opacity-60"
                 >
                   {busy === "create" ? (
                     <Loader2 size={17} className="animate-spin" />
@@ -148,14 +160,14 @@ function CreateRoomFlow({
               </div>
             </label>
 
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 my-1">
               <span className="h-px flex-1 bg-line" />
-              <span className="anno text-inkfaint">or join one</span>
+              <span className="anno text-[10px] text-inkfaint">or join one</span>
               <span className="h-px flex-1 bg-line" />
             </div>
 
-            <label className="flex flex-col gap-2">
-              <span className="anno">name or id</span>
+            <label className="flex flex-col gap-1.5">
+              <span className="anno text-[11px]">name or id</span>
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -163,12 +175,12 @@ function CreateRoomFlow({
                   value={joinSlug}
                   onChange={(e) => setJoinSlug(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && joinRoom()}
-                  className="w-full rounded-lg border border-line bg-white px-4 py-3 text-[15px] text-ink outline-none transition-colors placeholder:text-inkfaint focus:border-ink"
+                  className="w-full rounded-xl border border-line bg-paper-card px-4 py-2.5 text-[15px] text-ink outline-none transition-all placeholder:text-inkfaint focus:border-ink focus:ring-1 focus:ring-ink"
                 />
                 <button
                   onClick={joinRoom}
                   disabled={busy === "join"}
-                  className="btn btn-paper shrink-0 px-4 disabled:opacity-60"
+                  className="btn btn-paper shrink-0 !px-4 disabled:opacity-60"
                 >
                   {busy === "join" ? (
                     <Loader2 size={17} className="animate-spin" />
@@ -180,61 +192,68 @@ function CreateRoomFlow({
             </label>
 
             {error && (
-              <p className="rounded-lg border border-line bg-paper-2 px-4 py-3 text-[13.5px] leading-relaxed text-inksoft">
+              <p className="rounded-xl border border-line bg-paper-2 px-4 py-2.5 text-[13.5px] leading-relaxed text-inksoft font-medium">
                 {error}
               </p>
             )}
           </div>
 
           <div className="hairline-t mt-8 pt-6">
-            <p className="anno text-center">
+            <p className="anno text-center text-[11px]">
               backing out?{" "}
-              <Link href="/" className="text-marker hover:text-ink">
-                back to the landing
+              <Link href="/" className="text-marker font-semibold hover:text-ink transition-colors">
+                back to home
               </Link>
             </p>
           </div>
         </div>
 
-        <p className="anno absolute -right-1 -top-4 rotate-1 text-inkfaint">
+        <p className="anno absolute -right-1 -top-4 rotate-1 text-inkfaint/60 hidden sm:block">
           x 0 · y 0
         </p>
       </div>
     </div>
+    </>
   );
 }
 
 function SignInPrompt() {
   return (
-    <div className="board-grid relative flex min-h-screen items-center justify-center px-6">
-      <div className="corner-marks card w-full max-w-md p-10 text-center">
-        <p className="anno mb-4">room access</p>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Sign in to open the door
-        </h1>
-        <p className="mt-3 text-[15px] leading-relaxed text-inksoft">
-          Rooms are locked behind an account, so only the people you invite can
-          join your board.
-        </p>
-        <div className="mt-8 flex flex-wrap justify-center gap-3">
-          <Link href="/signup" className="btn btn-ink">
-            Create an account
-          </Link>
-          <Link href="/signin" className="btn btn-paper">
-            Sign in
-          </Link>
+    <>
+      <Nav />
+      <div className="board-grid relative flex min-h-screen items-center justify-center p-6">
+        <div className="corner-marks card w-full max-w-md p-8 sm:p-10 text-center shadow-xl">
+          <p className="anno mb-3 text-marker font-semibold">room access</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-ink">
+            Sign in to open the door
+          </h1>
+          <p className="mt-3 text-[15px] leading-relaxed text-inksoft">
+            Rooms are locked behind an account, so only the people you invite can
+            join your board.
+          </p>
+          <div className="mt-8 flex flex-wrap justify-center gap-3">
+            <Link href="/signup" className="btn btn-ink">
+              Create an account
+            </Link>
+            <Link href="/signin" className="btn btn-paper">
+              Sign in
+            </Link>
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
 function Skeleton() {
   return (
-    <div className="board-grid relative flex min-h-screen items-center justify-center px-6">
-      <div className="card w-full max-w-md p-10">
-        <div className="mx-auto h-2 w-2 animate-pulse rounded-full bg-ink/20" />
+    <>
+      <Nav />
+      <div className="board-grid relative flex min-h-screen items-center justify-center p-6">
+        <div className="card w-full max-w-md p-10 flex items-center justify-center">
+          <span className="live-dot h-3 w-3 rounded-full bg-marker" />
+        </div>
       </div>
-    </div>
+    </>
   );
 }
