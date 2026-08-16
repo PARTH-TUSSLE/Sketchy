@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ws-backend
+  namespace: sketchy
+  labels:
+    app: ws-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ws-backend
+  template:
+    metadata:
+      labels:
+        app: ws-backend
+    spec:
+      containers:
+        - name: ws-backend
+          image: parthtussle/sketchy-ws-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8381
+          env:
+            - name: PORT_WS
+              value: "8381"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sketchy-secrets
+                  key: DATABASE_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sketchy-secrets
+                  key: JWT_SECRET
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-backend-service
+  namespace: sketchy
+spec:
+  type: ClusterIP
+  selector:
+    app: ws-backend
+  ports:
+    - port: 8381
+      targetPort: 8381

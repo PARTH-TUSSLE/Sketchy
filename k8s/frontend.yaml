@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sketchy-frontend
+  namespace: sketchy
+  labels:
+    app: sketchy-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sketchy-frontend
+  template:
+    metadata:
+      labels:
+        app: sketchy-frontend
+    spec:
+      containers:
+        - name: sketchy-frontend
+          image: parthtussle/sketchy-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sketchy-frontend-service
+  namespace: sketchy
+spec:
+  type: ClusterIP
+  selector:
+    app: sketchy-frontend
+  ports:
+    - port: 3000
+      targetPort: 3000

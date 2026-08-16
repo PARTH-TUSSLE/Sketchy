@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sketchy-ingress
+  namespace: sketchy
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    traefik.ingress.kubernetes.io/router.entrypoints: "web,websecure"
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: "sketchy-strip-api@kubernetescrd"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - 389f3a16-25fc-438b-af71-afbe45a8ebfd.k8s.civo.com
+      secretName: sketchy-tls-secret
+  rules:
+    - host: 389f3a16-25fc-438b-af71-afbe45a8ebfd.k8s.civo.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: http-backend-service
+                port:
+                  number: 8380
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: ws-backend-service
+                port:
+                  number: 8381
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sketchy-frontend-service
+                port:
+                  number: 3000

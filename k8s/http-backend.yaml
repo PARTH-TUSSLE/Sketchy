@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-backend
+  namespace: sketchy
+  labels:
+    app: http-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: http-backend
+  template:
+    metadata:
+      labels:
+        app: http-backend
+    spec:
+      containers:
+        - name: http-backend
+          image: parthtussle/sketchy-http-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8380
+          env:
+            - name: PORT_HTTP
+              value: "8380"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sketchy-secrets
+                  key: DATABASE_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sketchy-secrets
+                  key: JWT_SECRET
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-backend-service
+  namespace: sketchy
+spec:
+  type: ClusterIP
+  selector:
+    app: http-backend
+  ports:
+    - port: 8380
+      targetPort: 8380
