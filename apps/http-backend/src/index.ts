@@ -10,6 +10,7 @@ import {
   CreateUserSchema,
   SignInSchema,
   CreateRoomSchema,
+  UpdateProfileSchema,
 } from "@repo/common/types";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
@@ -23,7 +24,7 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 app.post("/signup", rateLimiter, async (req, res) => {
   const parsedData = CreateUserSchema.safeParse(req.body);
@@ -122,6 +123,65 @@ app.post("/auth/refresh", rateLimiter, async (req, res) => {
     { expiresIn: "30d" }
   );
   res.json({ token: nextToken, refreshToken: nextRefresh });
+});
+
+app.get("/me", middleware, async (req, res) => {
+  try {
+    const user = await prismaClient.user.findUnique({
+      where: { id: req.userId! },
+      select: { id: true, email: true, name: true, photo: true },
+    });
+    if (!user) {
+      return res.status(401).json({ msg: "Account no longer exists" });
+    }
+
+    const rooms = await prismaClient.room.findMany({
+      where: { adminId: user.id },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, slug: true, backgroundColor: true, createdAt: true },
+    });
+
+    return res.json({ user, rooms });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ msg: "Failed to load profile" });
+  }
+});
+
+app.patch("/me", middleware, async (req, res) => {
+  const parsed = UpdateProfileSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.flatten() });
+  }
+
+  const photo = parsed.data.photo;
+  if (photo !== undefined && photo !== null && photo.length > 0) {
+    // Accept only base64 image data URLs (the browser upload path), never a
+    // raw external URL. The ~6.7 MB ceiling matches the 5 MB file cap.
+    const isImageDataUrl = /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(photo);
+    if (!isImageDataUrl) {
+      return res.status(400).json({ msg: "Photo must be an uploaded image" });
+    }
+    if (photo.length > 7_200_000) {
+      return res.status(400).json({ msg: "Photo must be 5 MB or smaller" });
+    }
+  }
+
+  try {
+    const user = await prismaClient.user.update({
+      where: { id: req.userId! },
+      data: {
+        ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+        ...(photo !== undefined ? { photo } : {}),
+      },
+      select: { id: true, email: true, name: true, photo: true },
+    });
+
+    return res.json({ user });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ msg: "Failed to update profile" });
+  }
 });
 
 app.post("/room", middleware, async (req, res) => {
