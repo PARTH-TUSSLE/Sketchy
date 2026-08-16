@@ -221,6 +221,14 @@ export class Game {
   private panLastX = 0;
   private panLastY = 0;
 
+  // Touch state tracking for mobile drawing, pinch zoom, and 2-finger pan
+  private touchStartDist = 0;
+  private touchStartZoom = 1;
+  private touchStartMid = { x: 0, y: 0 };
+  private touchLastMid = { x: 0, y: 0 };
+  private isPinching = false;
+  private lastTouchClient = { x: 0, y: 0 };
+
   // Presence: everyone else's cursors, keyed by userId, with their name.
   private remoteCursors = new Map<string, RemoteCursor>();
   private lastPointerSent = 0;
@@ -296,6 +304,7 @@ export class Game {
   private onPreMouseDown: (() => boolean | void) | null;
   private onBackgroundChange: ((color: string) => void) | null;
   private onHistoryChange: ((canUndo: boolean, canRedo: boolean) => void) | null;
+  private onPresenceChange: ((count: number) => void) | null;
 
   // Undo/redo stacks. Only local actions are recorded — remote room updates
   // arrive through the socket and are not part of your personal history.
@@ -313,6 +322,7 @@ export class Game {
       onPreMouseDown?: () => boolean | void;
       onBackgroundChange?: (color: string) => void;
       onHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
+      onPresenceChange?: (count: number) => void;
     } = {}
   ) {
     this.canvas = canvas;
@@ -328,6 +338,7 @@ export class Game {
     this.onPreMouseDown = opts.onPreMouseDown ?? null;
     this.onBackgroundChange = opts.onBackgroundChange ?? null;
     this.onHistoryChange = opts.onHistoryChange ?? null;
+    this.onPresenceChange = opts.onPresenceChange ?? null;
     this.configureCanvas();
     this.initHandlers();
     this.initMouseHandlers();
@@ -648,6 +659,10 @@ export class Game {
       this.laserAnimFrame = null;
     }
     this.canvas?.removeEventListener("mousedown", this.mouseDownHandler);
+    this.canvas?.removeEventListener("touchstart", this.touchStartHandler);
+    this.canvas?.removeEventListener("touchmove", this.touchMoveHandler);
+    this.canvas?.removeEventListener("touchend", this.touchEndHandler);
+    this.canvas?.removeEventListener("touchcancel", this.touchEndHandler);
     this.canvas?.removeEventListener("wheel", this.wheelHandler);
     this.canvas?.removeEventListener("mouseleave", this.mouseLeaveHandler);
     window.removeEventListener("mousemove", this.mouseMoveHandler);
@@ -727,12 +742,15 @@ export class Game {
           this.setRemoteCursor(m.userId, m.name, m.x, m.y);
         });
         this.scheduleCursorRedraw();
+        this.notifyPresenceCount();
       } else if (message.type === "presence_enter") {
         this.setRemoteCursor(message.userId, message.name, message.x, message.y);
         this.scheduleCursorRedraw();
+        this.notifyPresenceCount();
       } else if (message.type === "presence_leave") {
         this.remoteCursors.delete(message.userId);
         this.scheduleCursorRedraw();
+        this.notifyPresenceCount();
       }
     };
   }
@@ -762,6 +780,12 @@ export class Game {
       x: x ?? existing?.x ?? null,
       y: y ?? existing?.y ?? null,
     });
+  }
+
+  // Surface the live headcount (us + everyone else on the board) so the
+  // studio header can show how many people are connected right now.
+  private notifyPresenceCount() {
+    this.onPresenceChange?.(this.remoteCursors.size + 1);
   }
 
   // Throttled pointer telemetry so the room sees our cursor. When the laser
@@ -1368,11 +1392,10 @@ export class Game {
     const bottom = this.offsetY + h / this.zoom;
     const left = this.offsetX;
     const right = this.offsetX + w / this.zoom;
-    // Grid and the board's edge frame follow the paper tone: dark paper gets
-    // light hairlines (and vice-versa) so the drafting lines stay visible.
+    // Grid follows the paper tone: dark paper gets light hairlines (and
+    // vice-versa) so the drafting lines stay visible.
     const dark = this.isDarkBackground();
     const gridColor = dark ? "rgba(255, 255, 255, 0.08)" : "rgba(24, 24, 26, 0.05)";
-    const edgeColor = dark ? "rgba(255, 255, 255, 0.18)" : "rgba(24, 24, 26, 0.12)";
     ctx.strokeStyle = gridColor;
     ctx.lineWidth = 1 / this.zoom;
     // One batched path for the whole grid — a single stroke call instead of
@@ -1387,21 +1410,12 @@ export class Game {
       ctx.lineTo(right, y);
     }
     ctx.stroke();
-    // The finite edge of the board — a faint drafting frame.
-    ctx.strokeStyle = edgeColor;
-    ctx.lineWidth = 2 / this.zoom;
-    ctx.strokeRect(
-      -WORLD_LIMIT,
-      -WORLD_LIMIT,
-      WORLD_LIMIT * 2,
-      WORLD_LIMIT * 2
-    );
   }
 
-  // Rough perceived-luminance check so overlay strokes (grid hairlines, the
-  // board frame) can flip to light when the paper goes dark. Handles the hex
-  // swatches and the native color input's values; unknown formats fall back
-  // to treating the paper as light.
+  // Rough perceived-luminance check so overlay strokes (grid hairlines) can
+  // flip to light when the paper goes dark. Handles the hex swatches and the
+  // native color input's values; unknown formats fall back to treating the
+  // paper as light.
   private isDarkBackground(): boolean {
     const c = this.backgroundColor.trim();
     let r = 255;
@@ -2521,8 +2535,98 @@ export class Game {
     }
   };
 
+  touchStartHandler = (e: TouchEvent) => {
+    if (e.touches.length === 1) {
+      this.isPinching = false;
+      const t = e.touches[0]!;
+      this.lastTouchClient = { x: t.clientX, y: t.clientY };
+      const fakeEvent = {
+        button: 0,
+        clientX: t.clientX,
+        clientY: t.clientY,
+        preventDefault: () => {
+          if (e.cancelable) e.preventDefault();
+        },
+      } as unknown as MouseEvent;
+      this.mouseDownHandler(fakeEvent);
+    } else if (e.touches.length === 2) {
+      this.isPinching = true;
+      if (this.clicked) {
+        this.clicked = false;
+        this.points = [];
+        this.clearCanvas();
+      }
+      const t0 = e.touches[0]!;
+      const t1 = e.touches[1]!;
+      const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+      const midX = (t0.clientX + t1.clientX) / 2;
+      const midY = (t0.clientY + t1.clientY) / 2;
+      this.touchStartDist = dist;
+      this.touchStartZoom = this.zoom;
+      this.touchStartMid = screenPoint(this.canvas, midX, midY);
+      this.touchLastMid = { x: midX, y: midY };
+    }
+  };
+
+  touchMoveHandler = (e: TouchEvent) => {
+    if (e.cancelable) e.preventDefault();
+    if (this.isPinching || e.touches.length >= 2) {
+      if (e.touches.length >= 2) {
+        const t0 = e.touches[0]!;
+        const t1 = e.touches[1]!;
+        const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+        const midX = (t0.clientX + t1.clientX) / 2;
+        const midY = (t0.clientY + t1.clientY) / 2;
+
+        if (this.touchStartDist > 0) {
+          const scale = dist / this.touchStartDist;
+          const targetZoom = this.touchStartZoom * scale;
+          this.applyZoom(targetZoom, this.touchStartMid);
+        }
+
+        const dx = midX - this.touchLastMid.x;
+        const dy = midY - this.touchLastMid.y;
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+          this.panBy(dx, dy);
+          this.touchLastMid = { x: midX, y: midY };
+        }
+      }
+    } else if (e.touches.length === 1 && !this.isPinching) {
+      const t = e.touches[0]!;
+      this.lastTouchClient = { x: t.clientX, y: t.clientY };
+      const fakeEvent = {
+        clientX: t.clientX,
+        clientY: t.clientY,
+        shiftKey: false,
+      } as unknown as MouseEvent;
+      this.mouseMoveHandler(fakeEvent);
+    }
+  };
+
+  touchEndHandler = (e: TouchEvent) => {
+    if (e.touches.length === 0) {
+      if (this.isPinching) {
+        this.isPinching = false;
+        this.touchStartDist = 0;
+      } else {
+        const fakeEvent = {
+          clientX: this.lastTouchClient.x,
+          clientY: this.lastTouchClient.y,
+        } as unknown as MouseEvent;
+        this.mouseUpHandler(fakeEvent);
+      }
+    } else if (e.touches.length === 1 && this.isPinching) {
+      this.isPinching = false;
+      this.touchStartDist = 0;
+    }
+  };
+
   initMouseHandlers = () => {
     this.canvas?.addEventListener("mousedown", this.mouseDownHandler);
+    this.canvas?.addEventListener("touchstart", this.touchStartHandler, { passive: false });
+    this.canvas?.addEventListener("touchmove", this.touchMoveHandler, { passive: false });
+    this.canvas?.addEventListener("touchend", this.touchEndHandler, { passive: false });
+    this.canvas?.addEventListener("touchcancel", this.touchEndHandler, { passive: false });
     this.canvas?.addEventListener("wheel", this.wheelHandler, { passive: false });
     this.canvas?.addEventListener("mouseleave", this.mouseLeaveHandler);
     window.addEventListener("mousemove", this.mouseMoveHandler);

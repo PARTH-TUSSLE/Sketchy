@@ -6,6 +6,8 @@ import { TriangleAlert, RefreshCw } from "lucide-react";
 import { BACKEND_URL, WS_URL } from "../config";
 import Canvas from "../components/Canvas";
 import { ensureFreshToken, scheduleTokenRefresh } from "../lib/auth";
+import PlugConnectedIcon from "./icons/plug-connected-icon";
+import { Nav } from "./landing/Nav";
 
 type ConnState =
   | { status: "connecting" }
@@ -152,14 +154,14 @@ export default function RoomCanvas({ roomId }: { roomId: string }) {
       <Shell title="We couldn&apos;t find that board">
         <p>
           No room matches &quot;{roomKey}&quot;. Double-check the name, or start a new
-          one from the landing page.
+          one from the home page.
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Link href="/new-room" className="btn btn-ink">
             Name a new room
           </Link>
           <Link href="/" className="btn btn-paper">
-            Back to landing
+            Back to home
           </Link>
         </div>
       </Shell>
@@ -180,7 +182,7 @@ export default function RoomCanvas({ roomId }: { roomId: string }) {
             <RefreshCw size={16} /> Reconnect
           </button>
           <Link href="/" className="btn btn-paper">
-            Back to landing
+            Back to home
           </Link>
         </div>
       </Shell>
@@ -189,11 +191,18 @@ export default function RoomCanvas({ roomId }: { roomId: string }) {
 
   if (conn.status === "connecting") {
     return (
-      <div className="relative flex min-h-screen flex-col items-center justify-center gap-5 bg-[#141419] text-paper">
-        <span className="live-dot h-2.5 w-2.5 rounded-full bg-marker" />
-        <p className="animate-pulse font-[var(--font-plex)] text-sm tracking-[0.2em] uppercase text-paper/50">
-          tracing to the room…
-        </p>
+      <div className="relative flex min-h-screen flex-col items-center justify-center gap-6 bg-[#0a0b0f] text-white p-6">
+        <div className="relative flex items-center justify-center p-4 rounded-2xl border border-white/10 bg-white/5 shadow-2xl backdrop-blur-xl">
+          <PlugConnectedIcon size={32} color="#818cf8" />
+        </div>
+        <div className="flex flex-col items-center gap-1 text-center">
+          <p className="font-[var(--font-plex)] text-xs tracking-[0.2em] uppercase text-white/60 font-medium animate-pulse">
+            tracing to the room…
+          </p>
+          <p className="font-[var(--font-serif)] text-lg italic text-white/40">
+            {roomKey}
+          </p>
+        </div>
       </div>
     );
   }
@@ -215,16 +224,19 @@ function Shell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="board-grid relative flex min-h-screen items-center justify-center px-6">
-      <div className="corner-marks card w-full max-w-md p-10 text-center">
-        <div className="mx-auto mb-6 flex h-14 w-14 items-center justify-center rounded-full border border-line text-ink">
-          <TriangleAlert size={22} strokeWidth={1.6} />
-        </div>
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        <div className="mt-3 text-[15px] leading-relaxed text-inksoft">
-          {children}
+    <>
+      <Nav />
+      <div className="board-grid relative flex min-h-screen items-center justify-center p-6 pt-24">
+        <div className="corner-marks card w-full max-w-md p-8 sm:p-10 text-center shadow-xl">
+          <div className="mx-auto mb-6 flex h-12 w-12 items-center justify-center rounded-xl border border-line bg-paper-2 text-ink">
+            <TriangleAlert size={20} strokeWidth={1.75} />
+          </div>
+          <h1 className="text-2xl font-semibold tracking-tight text-ink">{title}</h1>
+          <div className="mt-3 text-[15px] leading-relaxed text-inksoft">
+            {children}
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
